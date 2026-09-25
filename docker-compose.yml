@@ -1,0 +1,11 @@
+services:
+  clipforge:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000" # local only; remove "127.0.0.1:" to expose on your network
+    volumes:
+      - clipforge-data:/data
+    restart: unless-stopped
+
+volumes:
+  clipforge-data:

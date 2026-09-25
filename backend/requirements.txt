@@ -1,0 +1,8 @@
+# Web API
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30
+# Video
+opencv-python-headless>=4.10
+numpy>=1.26
+imageio-ffmpeg>=0.5   # bundles a static FFmpeg build, so users don't need to install it
+yt-dlp>=2025.1.1
