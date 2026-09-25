@@ -59,7 +59,9 @@ async def upload_video(
         )
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > settings.max_upload_bytes:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"File is larger than {settings.max_upload_mb} MB")
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"File is larger than {settings.max_upload_mb} MB"
+        )
 
     project = Project(
         id=store.new_id(),

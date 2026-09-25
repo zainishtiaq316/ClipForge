@@ -70,7 +70,7 @@ class CameraPath:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "CameraPath":
+    def from_dict(cls, data: dict) -> CameraPath:
         return cls(times=data["times"], xs=data["xs"], crop_fraction=data["crop_fraction"])
 
 

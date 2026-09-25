@@ -73,7 +73,7 @@ class Analysis:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Analysis":
+    def from_dict(cls, data: dict) -> Analysis:
         return cls(
             sample_fps=data["sample_fps"],
             duration=data["duration"],

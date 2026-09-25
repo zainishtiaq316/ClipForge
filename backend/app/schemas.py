@@ -36,7 +36,7 @@ class Clip(BaseModel):
     title: str = Field(default="", max_length=80)
 
     @model_validator(mode="after")
-    def _ordered(self) -> "Clip":
+    def _ordered(self) -> Clip:
         self.start = round(self.start, 3)
         self.end = round(self.end, 3)
         if self.end - self.start < MIN_CLIP_LENGTH:
@@ -87,7 +87,7 @@ class ProjectOut(BaseModel):
     detector: str
 
     @classmethod
-    def of(cls, project: Project) -> "ProjectOut":
+    def of(cls, project: Project) -> ProjectOut:
         return cls(**project.model_dump(exclude={"source_file", "preview_file", "updated_at"}))
 
 

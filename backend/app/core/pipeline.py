@@ -17,7 +17,11 @@ log = logging.getLogger(__name__)
 
 executor = ThreadPoolExecutor(max_workers=settings.worker_threads, thread_name_prefix="ingest")
 
-BROWSER_SAFE = {(".mp4", "h264"), (".m4v", "h264"), (".mov", "h264"), (".webm", "vp8"), (".webm", "vp9"), (".webm", "av1")}
+# (container, codec) pairs every modern browser can play directly; anything else gets a preview proxy.
+BROWSER_SAFE = {
+    (".mp4", "h264"), (".m4v", "h264"), (".mov", "h264"),
+    (".webm", "vp8"), (".webm", "vp9"), (".webm", "av1"),
+}
 MIN_DURATION_S = 3.0
 
 

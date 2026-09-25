@@ -88,7 +88,8 @@ def render_vertical_clip(
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop_w}x{crop_h}", "-r", f"{fps}", "-i", "pipe:0",
     ]
     if info.has_audio:
-        encoder_args += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source), "-map", "0:v", "-map", "1:a:0"]
+        encoder_args += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+        encoder_args += ["-map", "0:v", "-map", "1:a:0"]
     if framing == "fit":
         video_filter = (
             f"split[a][b];"

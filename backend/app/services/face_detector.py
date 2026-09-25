@@ -76,12 +76,10 @@ class FaceDetector:
             _, rows = self._yunet.detect(frame_bgr)
             if rows is None:
                 return []
-            faces = []
-            for x, y, bw, bh, *rest in rows:
-                faces.append(
-                    Face(float((x + bw / 2) / w), float((y + bh / 2) / h), float(bw / w), float(bh / h), float(rest[-1]))
-                )
-            return faces
+            return [
+                Face(float((x + bw / 2) / w), float((y + bh / 2) / h), float(bw / w), float(bh / h), float(rest[-1]))
+                for x, y, bw, bh, *rest in rows
+            ]
 
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         rects = self._haar.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(24, 24))
