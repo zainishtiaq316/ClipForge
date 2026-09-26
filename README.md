@@ -16,13 +16,13 @@ It runs **100% locally** and uses only free, open-source tools: no API keys, no 
 |---|---|---|
 | 1 | Accept a YouTube URL or an uploaded video file (16:9) | Drag & drop / browse upload (MP4, MOV, MKV, WEBM, AVI) **or** paste a YouTube link (downloaded with `yt-dlp`, up to 1080p). |
 | 2 | Automatically segment the full video, with manual adjustment of start/end | The whole video is covered with clips cut at **pauses in speech** and **scene changes**, near a target length you choose (15-90 s). Adjust with draggable timeline handles (snap to scene cuts), typed times, ±1 s buttons, "set to playhead", split, add, delete or re-split. |
-| 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, lower thirds, end screens) is detected with **PP-OCRv3**. If it fits in the 9:16 window, the window shifts to include it; if it's wider, the original text pixels are re-wrapped into 2-3 lines in the **same font, colour and caption box** and placed back into the frame. Never blurred. A per-clip **zoom-out** slider shows more of the scene (e.g. an object in the speaker's hand) with solid bars. A live preview shows the result before exporting. |
+| 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". In medium and wide shots the camera frames the **whole person** (NanoDet body box, arms and hands included) and **zooms out automatically** with solid bars when they don't fit a full-frame 9:16. Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, lower thirds, end screens) is detected with **PP-OCRv3**. If it fits in the 9:16 window, the window shifts to include it; if it's wider, the original text pixels are re-wrapped into 2-3 lines in the **same font, colour and caption box** and placed back into the frame. Never blurred. A per-clip **zoom-out** slider shows more of the scene (e.g. an object in the speaker's hand) with solid bars. A live preview shows the result before exporting. |
 | 4 | Export clips one by one, or all at once | "Export" on any clip downloads an MP4. "Export all" (or select several) downloads a ZIP. |
 | 5 | Adjust clip length (extend or shorten) before exporting | "Extend 5s" / "Shorten 5s", length presets (15/30/45/60 s), drag handles, or type exact times. |
 | ● | Free & open-source only | FFmpeg, OpenCV, YuNet, yt-dlp, FastAPI, React. See [Tech stack](#tech-stack). |
 | ● | Runs locally with clear setup | One double-click launcher (`start.bat` / `start.sh`) or Docker. |
 | ● | Usable by a non-developer | Guided UI with drag & drop, progress steps, plain-English errors, autosave, tooltips and keyboard shortcuts. |
-| ● | Readable, organized code | Small single-purpose modules, typed API models, 39 automated tests, lint-clean (ruff, oxlint). |
+| ● | Readable, organized code | Small single-purpose modules, typed API models, 55 automated tests, lint-clean (ruff, oxlint). |
 
 ---
 
@@ -85,7 +85,9 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
    | **Center** | Fixed crop from the middle of the frame |
 
    **Zoom out** (0-100%) widens the view for any framing: 0% is a full-frame vertical video, higher values show more
-   of the scene with solid black bars above and below (re-wrapped text moves onto the bottom bar).
+   of the scene with solid black bars above and below (re-wrapped text moves onto the bottom bar). With *Smart*
+   framing the app also zooms out on its own when a person with outstretched arms doesn't fit; the slider can only add
+   to that.
 5. **Export.** Click the download icon on a clip for a single MP4, or **Export all** for a ZIP.
 
 **Keyboard shortcuts:** `Space` play/pause · `←/→` seek 1 s (`Shift` = 5 s) · `I` / `O` set start/end to the playhead ·
@@ -138,8 +140,12 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 - **Virtual camera:** a **dead zone** ignores small movements, then proportional follow with **velocity and
   acceleration limits**. At a **scene cut the camera re-anchors instantly** instead of panning across the edit.
 - **No face?** It follows the main moving element if it moves in most of the shot; otherwise it stays centered.
-- **Body-aware framing:** hand and object motion pulls the crop sideways (up to the point where the face would lose
-  its margin), so gestures and held objects stay in frame as much as a full-frame 9:16 allows.
+- **Whole-person framing & auto zoom:** NanoDet (OpenCV Zoo, 3.8 MB) finds each person's full body box, arms and
+  hands included. In medium and wide shots the camera frames that box instead of just the face. If the person is
+  wider than a full-height 9:16 window (arms out, a camera held at arm's length) the shot zooms out just enough, with
+  solid black bars. The zoom is one value per shot (the width needed 80% of the time), so it never "breathes".
+  Close-ups (face wider than 11% of the frame) stay full-frame and face-centred. Title cards without a face zoom out to
+  show all of their text. The per-clip slider can zoom out further, never less.
 
 ### On-screen text (never cut, never blurred)
 - **Which text:** only overlay *lines* count (wide and thin, at least 2.5% of the frame tall, on screen for at least
@@ -208,9 +214,10 @@ cd backend
 .venv/Scripts/python -m pytest -q      # macOS/Linux: .venv/bin/python -m pytest -q
 ```
 
-49 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
+55 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
 on-screen text (overlay detection, ignored T-shirt text and flashes, balanced wrapping, scaling, window shifting,
-slides as subject, zoom-out bar placement), zoom geometry, the real text detector,
+slides as subject, zoom-out bar placement), whole-person auto zoom (wide shots zoom, close-ups don't, title cards
+fit, no zoom breathing), word gaps vs letter spacing, zoom geometry, the real text detector,
 URL validation (including SSRF attempts), clip validation, and a full **end-to-end API run**: a synthetic video is
 uploaded, analysed, edited, re-split and exported (single MP4, zoomed-out clip and ZIP), and the output is checked to be
 9:16 with audio and the right duration. No network access is needed.
@@ -241,12 +248,13 @@ backend/
       downloader.py        yt-dlp + URL validation
       analyzer.py          one-pass faces / scenes / motion + pause detection
       face_detector.py     YuNet with Haar fallback
+      person_detector.py   NanoDet whole-body boxes (arms and hands included)
       text_detector.py     PP-OCRv3 on-screen text detection
       text_layout.py       plans and re-flows on-screen text into the vertical frame
       segmenter.py         automatic clip boundaries
       reframer.py          subject selection + virtual camera path
       renderer.py          9:16 render pipeline
-  models/                YuNet (MIT) and PP-OCRv3 (Apache-2.0) ONNX weights
+  models/                YuNet (MIT), NanoDet and PP-OCRv3 (Apache-2.0) ONNX weights
   tests/                 unit + end-to-end API tests
 frontend/
   src/
@@ -267,7 +275,7 @@ All free and open source:
 
 | Layer | Tools (license) |
 |---|---|
-| Video | FFmpeg (LGPL/GPL, via `imageio-ffmpeg`), OpenCV (Apache-2.0), YuNet face model (MIT), PP-OCRv3 text model (Apache-2.0), NumPy (BSD) |
+| Video | FFmpeg (LGPL/GPL, via `imageio-ffmpeg`), OpenCV (Apache-2.0), YuNet face model (MIT), NanoDet person model (Apache-2.0), PP-OCRv3 text model (Apache-2.0), NumPy (BSD) |
 | Download | yt-dlp (Unlicense) |
 | Backend | Python, FastAPI (MIT), Uvicorn (BSD), Pydantic (MIT) |
 | Frontend | React 19 (MIT), TypeScript, Vite (MIT), Tailwind CSS 4 (MIT), Lucide icons (ISC) |

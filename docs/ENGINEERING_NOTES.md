@@ -30,11 +30,14 @@ in that single pass. Audio is analysed in a separate, very cheap pass.
 - **Text detection runs every 0.4 s** instead of on every sample: text changes slowly, and the detector is the most
   expensive model (~40 ms per frame).
 
-### 2.2 YuNet for faces instead of Haar cascades or heavy detectors
+### 2.2 Small OpenCV Zoo models instead of heavy frameworks
 - **Haar cascades** (OpenCV's classic) are fast but miss profile views and small faces and give many false positives.
 - **YOLO / MediaPipe** are accurate but add large dependencies, model downloads, or version constraints.
 - **YuNet** (OpenCV Zoo, MIT, ~230 KB) is accurate on the WIDER Face benchmark, runs in ~15 ms per frame on CPU, and
   needs nothing beyond OpenCV. A Haar fallback keeps the tool working on unusual OpenCV builds.
+- The same reasoning picked **NanoDet-Plus** (3.8 MB, ~20 ms) for whole-body person boxes and **PP-OCRv3** (2.4 MB)
+  for text. All three are ONNX files run by OpenCV's DNN module: no PyTorch, no TensorFlow, no GPU, and 6.5 MB of
+  models in total. The heavier two run every 0.4 s instead of on every sample.
 
 ### 2.3 A "virtual camera operator", not raw face coordinates
 Following the detected face frame by frame looks jittery and robotic. The reframer works like a camera operator:
@@ -44,8 +47,10 @@ Following the detected face frame by frame looks jittery and robotic. The refram
 - At a **scene cut** the camera **jumps immediately** instead of panning across the edit.
 - **Subject selection with continuity bonus:** avoids ping-ponging between two people. If everyone fits in the crop,
   the group is framed together.
-- **Body-aware lean:** hands and held objects move while the face stays still, so the target leans towards the motion
-  centroid (45%), capped so the face always keeps a 12% margin inside the crop.
+- **Whole person, not just the face:** NanoDet (OpenCV Zoo, Apache-2.0, 3.8 MB, ~20 ms per frame) gives each person's
+  full body box, arms and hands included, every 0.4 s. In medium and wide shots the camera centres that box (the face
+  keeps a 12% margin). Close-ups (face wider than 11% of the frame) stay face-centred, because cutting the shoulders
+  is normal in vertical video.
 
 *Trade-off:* the speaker is chosen by face size and continuity, not by who is talking. Active-speaker detection
 (lip motion + audio) would improve two-person podcasts but adds complexity and processing time. The per-clip
@@ -93,10 +98,18 @@ A full-height 9:16 window from a 16:9 frame is only ~32% of the width (608 of 19
 camera in their hand needs ~825 px of width, which at 9:16 means ~1470 px of height. The video only has 1080, so the
 extra room has to be filled with something.
 
-**Decision:** every clip is full-frame by default. A per-clip **zoom-out slider** widens the window and fills the
-space above and below with **solid black**, never blur. Re-flowed text moves onto the bottom bar and gets bigger
-there. I avoided automatic zoom-out because a clip switching between full-frame and bars on its own looks unstable;
-the user decides when the context is worth the bars.
+**Decision:** full-frame whenever the subject fits; **zoom out automatically** only when it doesn't, filling the
+space above and below with **solid black**, never blur.
+- The zoom is decided **per shot**: the width the person needs 80% of the time (so one wild gesture doesn't shrink
+  the whole shot), rounded up to 5% steps and capped at 45% so people never become tiny. It stays constant for the
+  whole shot and changes only at a scene cut, where a change is invisible. No "breathing" zoom.
+- Title cards and end cards without a face zoom to show their widest text (up to the full width).
+- A per-clip **slider** lets the user zoom out further (e.g. to show a prop), never less than the automatic value.
+- Re-flowed text moves onto the bottom bar and is enlarged there.
+
+My first version only had the manual slider. Testing on real footage showed hands and held objects leaving the frame
+in medium shots, so detection-driven zoom became the default in Smart framing. *Track* framing keeps a pure
+full-frame crop for anyone who never wants bars.
 
 ### 2.5 Segmentation: structure over semantics
 **Decision:** cut at **pauses in speech** (preferred) and **scene cuts**, as close as possible to the target length.
@@ -172,7 +185,9 @@ quotas and rate limiting, virus scanning of uploads, HTTPS termination, audit lo
 
 - **Unit tests** for the pure logic: segmentation, scene-cut detection, camera smoothing (jitter, cuts, panning,
   bounds), no-face fallback, on-screen text (overlay detection, ignored T-shirt text and flashes, balanced wrapping,
-  scaling, window shifting, slides as subject, zoom-out bars), zoom geometry, legacy data migration, and URL and clip
+  scaling, window shifting, slides as subject, zoom-out bars), whole-person auto zoom (wide shots zoom, close-ups
+  don't, title cards fit, constant within a shot), word gaps vs letter spacing, zoom geometry, legacy data migration,
+  and URL and clip
   validation, including SSRF attempts.
 - **Model test:** the real text detector must find a caption on a synthetic frame.
 - **End-to-end API test:** a synthetic video with a gap in the audio is uploaded, analysed, edited, re-split and

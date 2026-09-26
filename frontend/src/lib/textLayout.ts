@@ -1,7 +1,7 @@
 // Mirror of backend/app/services/text_layout.py (geometry only) and renderer.crop_width,
 // so the live 9:16 preview shows the same framing and re-flowed text as the export.
 import type { CameraPathData, Clip, TextLayoutData, TextLineData } from './api'
-import { cropCenterAt } from './cameraPath'
+import { cropCenterAt, zoomAt } from './cameraPath'
 
 const MAX_LINE_WIDTH = 0.9
 const MAX_SEGMENTS = 3
@@ -13,6 +13,9 @@ const MIN_WRAP_SCALE = 0.85
 const BAR_TEXT_HEIGHT = 0.055
 const WINDOW_SUBJECT_MARGIN = 0.15
 const WINDOW_RAMP_S = 0.3
+const LETTER_CONTRAST = 50
+const TEXT_COLOR_TOL = 80
+const ERASE_COVERED = 0.8
 
 export type Rect = [number, number, number, number] // x, y, w, h
 
@@ -95,6 +98,7 @@ export interface LineOps {
   erase: Rect | null
   plate: Rect | null
   pastes: { src: Rect; dst: Rect }[]
+  segments: [number, number][] // which part of the line (0..1) each paste shows
 }
 
 function block(line: TextLineData, W: number, H: number, scale: number, maxW: number) {
@@ -170,7 +174,7 @@ export function layoutOps(lines: TextLineData[], v: View): LineOps[] {
       const pad = PLATE_PAD * b.segH
       plate = [Math.trunc((v.outW - widest) / 2 - pad), Math.trunc(blockTop - pad), Math.trunc(widest + 2 * pad), Math.trunc(b.blockH + 2 * pad)]
     }
-    return { line, erase, plate, pastes }
+    return { line, erase, plate, pastes, segments: b.segments }
   })
 }
 
@@ -183,7 +187,9 @@ export interface FrameLayout {
 /** Everything the preview needs to draw one frame, exactly like the renderer. */
 export function frameLayout(path: CameraPathData | null, clip: Clip | null | undefined, t: number, srcW: number, srcH: number): FrameLayout {
   const framing = clip?.framing ?? 'auto'
-  const cropW = cropWidth(srcW, srcH, clip?.zoom ?? 0)
+  // Smart framing zooms out automatically to keep a whole person / title card in frame.
+  const zoom = Math.max(clip?.zoom ?? 0, framing === 'auto' ? zoomAt(path, t) : 0)
+  const cropW = cropWidth(srcW, srcH, zoom)
   const follows = (framing === 'auto' || framing === 'track') && cropW < srcW
   const center = follows ? cropCenterAt(path, t, framing) : 0.5
   let x0 = Math.min(srcW - cropW, Math.max(0, Math.round(center * srcW - cropW / 2)))
@@ -197,3 +203,96 @@ export function frameLayout(path: CameraPathData | null, clip: Clip | null | und
 }
 
 export const bgrToCss = ([b, g, r]: number[]) => `rgb(${r} ${g} ${b})`
+
+export function eraseRect(op: LineOps): Rect | null {
+  if (!op.erase) return null
+  const pad = Math.trunc(0.15 * op.erase[3])
+  return [op.erase[0], op.erase[1] - pad, op.erase[2], op.erase[3] + 2 * pad]
+}
+
+/** How much of `rect` the re-flowed text will paint over (mirrors text_layout._covered_fraction). */
+export function coveredFraction([x, y, w, h]: Rect, op: LineOps): number {
+  if (w <= 0 || h <= 0) return 0
+  const rects = op.plate ? [op.plate] : op.pastes.map((p) => p.dst)
+  const cols = new Uint8Array(w * h)
+  for (const [ox, oy, ow, oh] of rects) {
+    const ax0 = Math.max(0, ox - x), ay0 = Math.max(0, oy - y)
+    const ax1 = Math.min(w, ox + ow - x), ay1 = Math.min(h, oy + oh - y)
+    for (let r = ay0; r < ay1; r++) cols.fill(1, r * w + ax0, r * w + ax1)
+  }
+  let sum = 0
+  for (let i = 0; i < cols.length; i++) sum += cols[i]
+  return sum / cols.length
+}
+
+let scratch: HTMLCanvasElement | null = null
+
+/** Draw erase + re-flowed text for one frame onto `ctx` (same rules as text_layout.draw_ops). */
+export function drawTextOps(ctx: CanvasRenderingContext2D, source: CanvasImageSource, ops: LineOps[]) {
+  const { width: ow, height: oh } = ctx.canvas
+  for (const op of ops) {
+    const rect = eraseRect(op)
+    if (!rect) continue
+    const [x, y, w, h] = rect
+    if (op.line.boxed && coveredFraction(rect, op) < ERASE_COVERED && y - h >= 0) {
+      // Mirror what is just above the old spot into it (no empty box left behind).
+      // With y' = 2y - y_user, the user rect [y-h, y] lands on [y, y+h], flipped.
+      ctx.save()
+      ctx.translate(0, 2 * y)
+      ctx.scale(1, -1)
+      ctx.drawImage(ctx.canvas, x, y - h, w, h, x, y - h, w, h)
+      ctx.restore()
+    } else {
+      ctx.fillStyle = bgrToCss(op.line.bg)
+      ctx.fillRect(x, y, w, h)
+    }
+  }
+  for (const op of ops) {
+    if (op.plate) {
+      ctx.fillStyle = bgrToCss(op.line.bg)
+      ctx.fillRect(...op.plate)
+    }
+    for (const [k, { src, dst }] of op.pastes.entries()) {
+      if (op.line.boxed) {
+        ctx.drawImage(source, ...src, ...dst)
+        continue
+      }
+      // Text on video / a plain backdrop: keep only the letters.
+      const [, , dw, dh] = dst
+      if (dw < 1 || dh < 1 || dw > ow || dh > oh) continue
+      scratch ??= document.createElement('canvas')
+      scratch.width = dw
+      scratch.height = dh
+      const sctx = scratch.getContext('2d', { willReadFrequently: true })!
+      sctx.drawImage(source, ...src, 0, 0, dw, dh)
+      const img = sctx.getImageData(0, 0, dw, dh)
+      const d = img.data
+      // Keep only columns inside the detected text (the padding may hold a shirt or a hand).
+      const [segA, segB] = op.segments[k]
+      const [coreA, coreB] = op.line.core ?? [0, 1]
+      for (let col = 0; col < dw; col++) {
+        const at = segA + ((col + 0.5) / dw) * (segB - segA)
+        if (at < coreA || at > coreB) for (let row = 0; row < dh; row++) d[(row * dw + col) * 4 + 3] = 0
+      }
+      const fg = op.line.fg
+      if (fg && fg.length === 3) {
+        // Keep only pixels of the letters' own colour (same rule as text_layout.letter_mask).
+        const [fb, fgG, fr] = fg
+        const tol2 = TEXT_COLOR_TOL * TEXT_COLOR_TOL
+        for (let i = 0; i < d.length; i += 4) {
+          const dr = d[i] - fr, dg = d[i + 1] - fgG, db = d[i + 2] - fb
+          if (dr * dr + dg * dg + db * db >= tol2) d[i + 3] = 0
+        }
+      } else {
+        const [b, g, r] = op.line.bg
+        const bgGray = 0.299 * r + 0.587 * g + 0.114 * b
+        for (let i = 0; i < d.length; i += 4) {
+          const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+          if (Math.abs(gray - bgGray) <= LETTER_CONTRAST) d[i + 3] = 0
+        }
+      }
+      sctx.putImageData(img, 0, 0)
+      ctx.drawImage(scratch, dst[0], dst[1])
+    }
+  }
+}

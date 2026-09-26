@@ -57,6 +57,10 @@ MIN_WRAP_SCALE = 0.85  # prefer fewer lines as long as the text stays at >= 85% 
 BAR_TEXT_HEIGHT = 0.055  # text moved onto a zoom-out bar is at least this tall (fraction of output)
 WINDOW_SUBJECT_MARGIN = 0.15  # when shifting the window to fit text, the subject stays this far from its edges
 WINDOW_RAMP_S = 0.3  # ease the window shift in / out
+LETTER_CONTRAST = 50  # grey-level difference that separates letters from a plain background
+TEXT_COLOR_TOL = 80  # a pixel belongs to the letters when it is this close to their colour (RGB distance)
+BOX_CONTRAST = 28  # a caption box must differ at least this much from what surrounds it
+ERASE_COVERED = 0.8  # the re-flowed text hides the erased original when it covers this much of it
 PRESENCE_MIN_CORR = 0.5  # the region must still look like the reference text (0..1 correlation)
 THUMB_W, THUMB_H = 48, 8  # tiny grayscale fingerprint of each line for that check
 
@@ -74,12 +78,16 @@ class TextLine:
     bg: tuple[int, int, int]  # box / background colour, BGR
     ink: float  # fraction of "ink" pixels on the reference frame
     thumb: tuple[int, ...] = ()  # THUMB_W x THUMB_H grayscale fingerprint of the reference text
+    fg: tuple[int, ...] = ()  # the letters' own colour (BGR), for text that isn't on a caption box
+    core: tuple[float, float] = (0.0, 1.0)  # where the letters are across the rect (the rest is padding)
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["cuts"] = [round(c, 4) for c in self.cuts]
         data["bg"] = list(self.bg)
         data["thumb"] = list(self.thumb)
+        data["fg"] = list(self.fg)
+        data["core"] = [round(c, 4) for c in self.core]
         for key in ("x", "y", "w", "h", "ink"):
             data[key] = round(data[key], 4)
         return data
@@ -88,7 +96,9 @@ class TextLine:
     def from_dict(cls, data: dict) -> TextLine:
         return cls(
             x=data["x"], y=data["y"], w=data["w"], h=data["h"], cuts=tuple(data["cuts"]),
-            boxed=data["boxed"], bg=tuple(data["bg"]), ink=data["ink"], thumb=tuple(data.get("thumb", ())),
+            boxed=data["boxed"], bg=tuple(data["bg"]), ink=data["ink"],
+            thumb=tuple(data.get("thumb", ())), fg=tuple(data.get("fg", ())),
+            core=tuple(data.get("core", (0.0, 1.0))),
         )
 
 
@@ -218,6 +228,33 @@ def ink_mask(patch: np.ndarray, boxed: bool, bg: tuple[int, int, int]) -> np.nda
     return (cv2.absdiff(gray, cv2.medianBlur(gray, k)) > 40).astype(np.uint8)
 
 
+def letter_mask(patch: np.ndarray, bg: tuple[int, int, int], fg: tuple[int, ...] = ()) -> np.ndarray:
+    """The letters of text that is not on a caption box, without anything behind them.
+
+    With the letters' colour known (``fg``, measured at planning time) only pixels of
+    that colour count, so a shirt, a face or the stage behind the text is left
+    behind when the text is moved. Without it, fall back to "unlike the background".
+    The frontend preview uses the same rule (textLayout.ts), so both look the same.
+    """
+    if fg:
+        diff = patch.astype(np.int16) - np.asarray(fg, dtype=np.int16)
+        return ((diff.astype(np.int32) ** 2).sum(axis=2) < TEXT_COLOR_TOL**2).astype(np.uint8)
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    bg_gray = int(cv2.cvtColor(np.uint8([[bg]]), cv2.COLOR_BGR2GRAY)[0, 0])
+    return (np.abs(gray - bg_gray) > LETTER_CONTRAST).astype(np.uint8)
+
+
+def _letter_colour(patch: np.ndarray, bg: tuple[int, int, int]) -> tuple[int, ...]:
+    """The dominant colour of the letters: the most contrasting pixels vs. the background."""
+    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    bg_gray = int(cv2.cvtColor(np.uint8([[bg]]), cv2.COLOR_BGR2GRAY)[0, 0])
+    contrast = np.abs(gray - bg_gray)
+    strong = contrast >= max(LETTER_CONTRAST, np.percentile(contrast, 90) * 0.8)
+    if strong.sum() < 20:
+        return ()
+    return tuple(int(v) for v in np.median(patch[strong], axis=0))
+
+
 def _grow_box(frame: np.ndarray, rect: list[int], bg: np.ndarray, limit: int) -> list[int]:
     """Extend a rectangle outwards while the next row/column still has the box colour."""
     fh, fw = frame.shape[:2]
@@ -268,12 +305,22 @@ def _measure_line(frame: np.ndarray, box: TextBox) -> TextLine | None:
     if boxed:
         bg_arr = edge_bg
         x0, y0, x1, y1 = _grow_box(frame, core, bg_arr, limit=int(0.8 * (core[3] - core[1])))
-    else:
+        # A real caption box stands out from its surroundings; a plain backdrop (a dark
+        # stage, a white title card) just continues outside, so it isn't a box.
+        o = 3
+        outside = np.concatenate([
+            frame[max(0, y0 - o):y0, x0:x1].reshape(-1, 3), frame[y1:y1 + o, x0:x1].reshape(-1, 3),
+            frame[y0:y1, max(0, x0 - o):x0].reshape(-1, 3), frame[y0:y1, x1:x1 + o].reshape(-1, 3),
+        ])
+        if outside.size and float(np.abs(outside.astype(np.int16) - bg_arr).mean()) < BOX_CONTRAST:
+            boxed = False
+    if not boxed:
         pad_x, pad_y = 0.35 * box.h * fh, 0.25 * box.h * fh
         x0, y0 = int(max(0, core[0] - pad_x)), int(max(0, core[1] - pad_y))
         x1, y1 = int(min(fw, core[2] + pad_x)), int(min(fh, core[3] + pad_y))
         ring = np.concatenate([frame[y0:y0 + 2, x0:x1].reshape(-1, 3), frame[y1 - 2:y1, x0:x1].reshape(-1, 3)])
         bg_arr = np.median(ring, axis=0)
+    bg_arr = np.asarray(bg_arr)
     bg = tuple(int(v) for v in bg_arr)
 
     patch = frame[y0:y1, x0:x1]
@@ -282,24 +329,58 @@ def _measure_line(frame: np.ndarray, box: TextBox) -> TextLine | None:
     if ink < 0.01:
         return None
 
-    # Word gaps: runs of ink-free columns wider than ~a fifth of the letter height.
-    columns = mask.sum(axis=0) > 0
-    min_gap = max(3, int(0.13 * (core[3] - core[1])))
-    cuts, run_start = [], None
-    inked = np.flatnonzero(columns)
-    first, last = (inked[0], inked[-1]) if inked.size else (0, len(columns) - 1)
-    for i in range(first, last + 1):
-        if not columns[i] and run_start is None:
-            run_start = i
-        elif columns[i] and run_start is not None:
-            if i - run_start >= min_gap:
-                cuts.append((run_start + i) / 2 / len(columns))
-            run_start = None
+    cuts = _word_gaps(mask, core[3] - core[1])
 
     return TextLine(
         x=x0 / fw, y=y0 / fh, w=(x1 - x0) / fw, h=(y1 - y0) / fh,
         cuts=tuple(cuts), boxed=bool(boxed), bg=bg, ink=ink, thumb=tuple(int(v) for v in _thumb(patch).ravel()),
+        fg=() if boxed else _letter_colour(patch, bg),
+        core=(0.0, 1.0) if boxed else ((core[0] - x0) / (x1 - x0), (core[2] - x0) / (x1 - x0)),
     )
+
+
+def _word_gaps(mask: np.ndarray, letter_h: int) -> list[float]:
+    """Centres (0..1) of the spaces between words.
+
+    Ink-free column runs are either letter spacing or word spacing. When the gaps
+    fall into two clearly different sizes, the bigger group is word spacing. When
+    they are all alike (one word in a wide display font, like "DEPARTURE"), only a
+    gap wider than a third of the letter height counts, so a word is never split.
+    """
+    columns = mask.sum(axis=0) > 0
+    inked = np.flatnonzero(columns)
+    if inked.size == 0:
+        return []
+    gaps, run_start = [], None
+    for i in range(inked[0], inked[-1] + 1):
+        if not columns[i] and run_start is None:
+            run_start = i
+        elif columns[i] and run_start is not None:
+            gaps.append((run_start, i))
+            run_start = None
+    if not gaps:
+        return []
+    min_gap = max(3, int(0.13 * letter_h))
+    always = max(min_gap, int(0.35 * letter_h))
+    widths = sorted(b - a for a, b in gaps)
+    threshold = always
+    jumps = [(widths[i + 1] / max(1, widths[i]), i) for i in range(len(widths) - 1)]
+    if jumps:
+        ratio, i = max(jumps)
+        if ratio >= 1.5:
+            threshold = max(min_gap, widths[i + 1])
+    return [(a + b) / 2 / len(columns) for a, b in gaps if b - a >= min(threshold, always)]
+
+
+def _with_companions(lines: list[TextBox], all_boxes: list[TextBox]) -> list[TextBox]:
+    """Add short text that sits on the same row as an overlay line ("July 2017" next to a place name)."""
+    out = list(lines)
+    for b in all_boxes:
+        if b in out or b.h < LINE_MIN_HEIGHT or b.w / max(b.h, 1e-6) < 1.5:
+            continue
+        if any(min(b.y + b.h, ln.y + ln.h) - max(b.y, ln.y) >= 0.6 * min(b.h, ln.h) for ln in lines):
+            out.append(b)
+    return out
 
 
 def plan_text_layouts(
@@ -314,7 +395,8 @@ def plan_text_layouts(
             continue
         scale = 640 / info.width
         small = cv2.resize(frame, (640, max(32, round(info.height * scale))), interpolation=cv2.INTER_AREA)
-        boxes = _merge_same_line(overlay_lines(detector.detect(small)))
+        detected = detector.detect(small)
+        boxes = _merge_same_line(_with_companions(overlay_lines(detected), detected))
         lines = [ln for ln in (_measure_line(frame, b) for b in boxes) if ln is not None]
         if lines:
             ordered = tuple(sorted(lines, key=lambda ln: ln.y))
@@ -362,6 +444,7 @@ class LineOps:
     erase: tuple[int, int, int, int] | None  # visible part of the half-cut original, output px
     plate: tuple[int, int, int, int] | None  # caption box behind the reflowed text, output px
     pastes: list[Paste]
+    segments: list[tuple[float, float]]  # which part of the line (0..1) each paste shows
 
 
 def _best_split(cuts: tuple[float, ...], k: int) -> list[tuple[float, float]]:
@@ -489,7 +572,7 @@ def layout_ops(lines: tuple[TextLine, ...], view: View) -> list[LineOps]:
             pad = PLATE_PAD * seg_h
             plate = (int((view.out_w - widest_px) / 2 - pad), int(top - pad), int(widest_px + 2 * pad),
                      int(block_h + 2 * pad))
-        ops.append(LineOps(line=line, erase=erase, plate=plate, pastes=pastes))
+        ops.append(LineOps(line=line, erase=erase, plate=plate, pastes=pastes, segments=list(segments)))
     return ops
 
 
@@ -520,30 +603,52 @@ def is_present(frame: np.ndarray, line: TextLine) -> bool:
     return float(np.corrcoef(now, ref)[0, 1]) >= PRESENCE_MIN_CORR
 
 
+def _covered_fraction(rect: tuple[int, int, int, int], op: LineOps) -> float:
+    """How much of ``rect`` the re-flowed text (plate or pieces) will paint over."""
+    x, y, w, h = rect
+    mask = np.zeros((max(1, h), max(1, w)), bool)
+    for ox, oy, ow, oh in [op.plate] if op.plate else [p.dst for p in op.pastes]:
+        ax0, ay0 = max(0, ox - x), max(0, oy - y)
+        ax1, ay1 = min(w, ox + ow - x), min(h, oy + oh - y)
+        if ax1 > ax0 and ay1 > ay0:
+            mask[ay0:ay1, ax0:ax1] = True
+    return float(mask.mean())
+
+
+def erase_rect(op: LineOps) -> tuple[int, int, int, int] | None:
+    if op.erase is None:
+        return None
+    pad = int(0.15 * op.erase[3])
+    return op.erase[0], op.erase[1] - pad, op.erase[2], op.erase[3] + 2 * pad
+
+
 def draw_ops(canvas: np.ndarray, frame: np.ndarray, ops: list[LineOps]) -> None:
     """Erase half-cut originals, then paste the reflowed text (in place, on ``canvas``)."""
     oh, ow = canvas.shape[:2]
     present = [op for op in ops if is_present(frame, op.line)]
     for op in present:
-        if op.erase is None:
-            continue
-        pad = int(0.15 * op.erase[3])
-        r = _clip_rect((op.erase[0], op.erase[1] - pad, op.erase[2], op.erase[3] + 2 * pad), ow, oh)
+        rect = erase_rect(op)
+        r = _clip_rect(rect, ow, oh) if rect else None
         if r is None:
             continue
         x0, y0, x1, y1 = r
-        if op.line.boxed:
+        if op.line.boxed and _covered_fraction(rect, op) < ERASE_COVERED and y0 - (y1 - y0) >= 0:
+            # The text moved elsewhere (e.g. onto a zoom-out bar): hide the old spot with a
+            # mirror of what is just above it, so no empty box or smear is left behind.
+            canvas[y0:y1, x0:x1] = canvas[y0 - (y1 - y0):y0, x0:x1][::-1]
+        elif op.line.boxed:
             canvas[y0:y1, x0:x1] = op.line.bg
         else:
             region = canvas[y0:y1, x0:x1]
-            mask = cv2.dilate(ink_mask(region, False, op.line.bg) * 255, np.ones((5, 5), np.uint8))
+            mask = ink_mask(region, False, op.line.bg) | letter_mask(region, op.line.bg, op.line.fg)
+            mask = cv2.dilate(mask * 255, np.ones((5, 5), np.uint8))
             canvas[y0:y1, x0:x1] = cv2.inpaint(region, mask, 3, cv2.INPAINT_TELEA)
 
     for op in present:
         if op.plate is not None and (r := _clip_rect(op.plate, ow, oh)):
             x0, y0, x1, y1 = r
             canvas[y0:y1, x0:x1] = op.line.bg
-        for paste in op.pastes:
+        for paste, (seg_a, seg_b) in zip(op.pastes, op.segments):
             sx, sy, sw, sh = paste.src
             piece = frame[sy: sy + sh, sx: sx + sw]
             if piece.size == 0:
@@ -558,10 +663,11 @@ def draw_ops(canvas: np.ndarray, frame: np.ndarray, ops: list[LineOps]) -> None:
             if op.line.boxed:
                 canvas[y0:y1, x0:x1] = piece
             else:
-                # Text straight on video: feather the edges so no rectangle shows.
-                alpha = np.zeros(piece.shape[:2], np.float32)
-                edge = max(2, min(piece.shape[:2]) // 6)
-                alpha[edge:-edge, edge:-edge] = 1.0
-                alpha = cv2.GaussianBlur(alpha, (0, 0), edge / 2)[..., None]
+                # Text straight on video / a plain backdrop: paste only the letters.
+                letters = cv2.dilate(letter_mask(piece, op.line.bg, op.line.fg), np.ones((2, 2), np.uint8))
+                # Keep only columns inside the detected text (the padding may hold a shirt or a hand).
+                cols = seg_a + (np.arange(dw)[x0 - dx: x1 - dx] + 0.5) / dw * (seg_b - seg_a)
+                letters[:, (cols < op.line.core[0]) | (cols > op.line.core[1])] = 0
+                alpha = cv2.GaussianBlur(letters.astype(np.float32), (0, 0), 0.8)[..., None]
                 base = canvas[y0:y1, x0:x1].astype(np.float32)
                 canvas[y0:y1, x0:x1] = (piece * alpha + base * (1 - alpha)).astype(np.uint8)

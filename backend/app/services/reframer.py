@@ -6,25 +6,26 @@ Pipeline (per shot, where a shot is the span between two scene cuts):
    more confident faces win, but the face nearest the current subject gets a
    continuity bonus (hysteresis), so the camera doesn't ping-pong between two
    people. If every face fits inside the crop at once, frame the whole group.
-2. **Gap filling**: short detection dropouts (head turns, blinks of the
-   detector) are interpolated. Shots with no face at all fall back to the
-   motion centroid (the "key element"), then to the centre.
-3. **Denoising**: a median filter removes single-sample outliers, then a
+2. **Whole-person framing**: in medium and wide shots the camera frames the
+   *person* (NanoDet body box, arms and hands included), not just the face. If
+   the person is wider than a full-height 9:16 window (arms out, an object held at
+   arm's length), the shot is **zoomed out** just enough, with solid bars. The
+   zoom is constant per shot so it never "breathes". Close-ups stay face-centred
+   (cutting the shoulders is normal in vertical video). Shots with no face but
+   with on-screen text (title cards, end cards) zoom to fit the text.
+3. **Gap filling**: short detection dropouts are interpolated. Shots with no face
+   and no text fall back to the motion centroid, then to the centre.
+4. **Denoising**: a median filter removes single-sample outliers, then a
    zero-phase Gaussian smooths the target. Zero-phase means the camera starts
    moving slightly *before* the subject does, which looks like a human operator.
-4. **Virtual camera**: a follower with a dead zone (small moves are ignored),
+5. **Virtual camera**: a follower with a dead zone (small moves are ignored),
    proportional speed and velocity/acceleration clamps. At a scene cut the
    camera re-anchors instantly instead of panning across the edit.
 
-5. **Body-aware framing**: hands, gestures and held objects move while the face
-   stays still, so the crop leans towards where the motion is, as far as it can
-   while keeping the face comfortably inside the frame.
+On-screen text that still doesn't fit is re-flowed into the frame at render time
+(see ``text_layout``); the text layouts are stored with the camera path.
 
-On-screen text is handled separately (see ``text_layout``): it is re-flowed into
-the vertical frame instead of being cropped. The text layouts are stored with the
-camera path.
-
-The output is a list of ``(time, centre_x)`` keyframes in normalised source
+The output is a list of ``(time, centre_x, zoom)`` keyframes in normalised source
 coordinates. The same data drives both the browser preview and the final render,
 so what the user sees is what they export.
 """
@@ -37,7 +38,7 @@ import numpy as np
 
 from .analyzer import Analysis, Sample
 from .face_detector import Face
-from .text_layout import TextLayout
+from .text_layout import TextLayout, overlay_lines
 
 PATH_FPS = 10  # resolution of the stored camera path
 
@@ -45,6 +46,21 @@ PATH_FPS = 10  # resolution of the stored camera path
 MIN_FACE_WIDTH = 0.012  # ignore faces narrower than 1.2% of the frame (crowds, posters)
 CONTINUITY_RADIUS = 0.08
 CONTINUITY_BONUS = 2.0
+
+# Whole-person framing and auto zoom
+CLOSE_UP_FACE_WIDTH = 0.11  # a face wider than this is a close-up: frame the face, not the body
+ARMS_OUT_RATIO = 4.5  # shoulders are ~3-4 face widths; a wider body box means arms / a held object stick out
+SHOULDERS_HEIGHT_RATIO = 6.0  # a body box under ~6 face heights is head-and-shoulders, not a full body
+PERSON_MARGIN = 0.03  # room left of and right of the person (fraction of frame width)
+TEXT_MARGIN = 0.03
+FACE_MARGIN_OF_CROP = 0.12  # the face always keeps this much room to the crop edge
+ZOOM_PERCENTILE = 80  # zoom for the width the person needs most of the time, not for one wild gesture
+TEXT_ZOOM_PERCENTILE = 100  # a title card must be shown whole
+MAX_ZOOM_WITH_PERSON = 0.45  # never shrink a person more than this (0 = full-frame, 1 = whole width)
+MAX_ZOOM_TEXT_ONLY = 1.0
+MIN_ZOOM_STEP = 0.05  # quantise so neighbouring shots match
+MIN_USEFUL_ZOOM = 0.08  # smaller zooms would only add thin bars
+DETECTION_REACH_S = 0.5  # person/text detections run every 0.4 s; reuse them for nearby samples
 
 # Fallback when a shot has no faces
 MIN_MOTION = 0.01  # at least 1% of pixels changed
@@ -54,10 +70,6 @@ MIN_MOTION_COVERAGE = 0.5  # in at least half of the shot's samples
 MAX_GAP_S = 2.5  # longer gaps than this hold the last position instead of interpolating
 MEDIAN_WINDOW_S = 1.0
 GAUSSIAN_SIGMA_S = 0.45
-
-# Body-aware framing
-BODY_BIAS = 0.45  # how far the crop leans from the face towards hand / object motion
-FACE_MARGIN_OF_CROP = 0.12  # the face always keeps this much room to the crop edge
 
 # Virtual camera (units: fraction of source width)
 DEAD_ZONE_OF_CROP = 0.12  # subject may drift 12% of the crop width before we move
@@ -72,9 +84,15 @@ class CameraPath:
     xs: list[float]  # crop centre, normalised to source width
     crop_fraction: float
     text_layouts: tuple[TextLayout, ...] = ()  # overlay text to re-flow into the vertical frame
+    zs: list[float] | None = None  # automatic zoom-out per keyframe (0 = full-frame 9:16)
 
     def at(self, t: np.ndarray | float) -> np.ndarray:
         return np.interp(t, self.times, self.xs)
+
+    def zoom_at(self, t: np.ndarray | float) -> np.ndarray:
+        if not self.zs:
+            return np.zeros(np.shape(t)) if np.ndim(t) else np.float64(0.0)
+        return np.interp(t, self.times, self.zs)
 
     def text_at(self, t: float) -> TextLayout | None:
         return next((lay for lay in self.text_layouts if lay.start <= t < lay.end), None)
@@ -84,6 +102,7 @@ class CameraPath:
             "crop_fraction": round(self.crop_fraction, 5),
             "times": [round(t, 3) for t in self.times],
             "xs": [round(x, 4) for x in self.xs],
+            "zs": [round(z, 3) for z in (self.zs or [0.0] * len(self.times))],
             "text_layouts": [lay.to_dict() for lay in self.text_layouts],
         }
 
@@ -94,6 +113,7 @@ class CameraPath:
             xs=data["xs"],
             crop_fraction=data["crop_fraction"],
             text_layouts=tuple(TextLayout.from_dict(d) for d in data.get("text_layouts", [])),
+            zs=data.get("zs"),
         )
 
 
@@ -102,10 +122,12 @@ def crop_fraction(width: int, height: int) -> float:
     return min(1.0, (height * 9 / 16) / width)
 
 
-def _select_subject(
-    faces: list[Face], previous: float | None, crop_frac: float
-) -> tuple[float, float] | None:
-    """Centre x of the subject and its half-width (how much room it needs)."""
+def zoomed_fraction(base: float, zoom: float) -> float:
+    return base + zoom * (1 - base)
+
+
+def _select_subject(faces: list[Face], previous: float | None, crop_frac: float) -> Face | None:
+    """The face to follow, or a synthetic 'face' spanning a group that fits the crop."""
     faces = [f for f in faces if f.w >= MIN_FACE_WIDTH]
     if not faces:
         return None
@@ -115,7 +137,8 @@ def _select_subject(
         left = min(f.cx - f.w / 2 for f in faces)
         right = max(f.cx + f.w / 2 for f in faces)
         if right - left <= crop_frac * 0.85:
-            return (left + right) / 2, (right - left) / 2
+            biggest = max(faces, key=lambda f: f.w)
+            return Face((left + right) / 2, biggest.cy, right - left, biggest.h, biggest.score)
 
     def weight(face: Face) -> float:
         w = face.area * face.score
@@ -123,20 +146,52 @@ def _select_subject(
             w *= 1 + CONTINUITY_BONUS * np.exp(-abs(face.cx - previous) / CONTINUITY_RADIUS)
         return w
 
-    face = max(faces, key=weight)
-    return face.cx, face.w / 2
+    return max(faces, key=weight)
 
 
-def _lean_towards_motion(face_x: float, half_w: float, sample: Sample, crop_frac: float) -> float:
-    """Shift the framing towards hand / object motion without losing the face."""
-    if sample.motion_x is None or sample.motion < MIN_MOTION:
-        return face_x
-    # The furthest the crop centre may move while the face keeps its margin.
-    room = crop_frac / 2 - half_w - FACE_MARGIN_OF_CROP * crop_frac
-    if room <= 0:
-        return face_x
-    offset = float(np.clip(BODY_BIAS * (sample.motion_x - face_x), -room, room))
-    return face_x + offset
+def _nearest(samples: list[Sample], i: int, attr: str):
+    """The closest sample (in time) that ran the detector behind ``attr``."""
+    best, best_dt = None, DETECTION_REACH_S
+    for j in range(max(0, i - 4), min(len(samples), i + 5)):
+        value = getattr(samples[j], attr)
+        dt = abs(samples[j].t - samples[i].t)
+        if value is not None and dt <= best_dt:
+            best, best_dt = value, dt
+    return best
+
+
+def _person_span(face: Face, sample_persons) -> tuple[float, float] | None:
+    """Horizontal extent of the body that belongs to ``face`` (arms and hands included)."""
+    if face.w >= CLOSE_UP_FACE_WIDTH or not sample_persons:
+        return None
+    owners = [p for p in sample_persons if p.x <= face.cx <= p.x + p.w and p.y <= face.cy <= p.y + p.h]
+    if not owners:
+        return None
+    body = max(owners, key=lambda p: p.w * p.h)
+    # A medium close-up's box is just the shoulders; cutting them is normal in vertical video.
+    # Only when arms or a held object stick out (or the whole body is small) is it worth framing.
+    shoulders_only = body.h < SHOULDERS_HEIGHT_RATIO * face.h  # the box stops at the chest, not the feet
+    if shoulders_only and body.w <= ARMS_OUT_RATIO * face.w:
+        return None
+    return max(0.0, body.x - PERSON_MARGIN), min(1.0, body.x + body.w + PERSON_MARGIN)
+
+
+def _text_span(text) -> tuple[float, float] | None:
+    lines = overlay_lines(text or [])
+    if not lines:
+        return None
+    return max(0.0, min(b.x for b in lines) - TEXT_MARGIN), min(1.0, max(b.x + b.w for b in lines) + TEXT_MARGIN)
+
+
+def _quantised_zoom(width: float, base: float, cap: float) -> float:
+    """Smallest zoom step that fits ``width`` (rounded up, so nothing is cut)."""
+    if width <= base:
+        return 0.0
+    zoom = min(cap, (width - base) / (1 - base))
+    if zoom < MIN_USEFUL_ZOOM:
+        return 0.0  # a sliver of bars isn't worth it; the camera position handles small overhangs
+    zoom = np.ceil(zoom / MIN_ZOOM_STEP - 1e-6) * MIN_ZOOM_STEP
+    return float(min(cap, zoom))
 
 
 def _fill_gaps(times: np.ndarray, values: np.ndarray) -> np.ndarray:
@@ -172,33 +227,67 @@ def _gaussian(values: np.ndarray, sigma_samples: float) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid")
 
 
-def _shot_target(samples: list[Sample], crop_frac: float, sample_fps: float) -> np.ndarray:
-    """Smoothed subject x for every sample of one shot."""
+def _shot_plan(samples: list[Sample], base: float, sample_fps: float) -> tuple[np.ndarray, float]:
+    """Smoothed subject x for every sample of one shot, and the shot's zoom."""
     times = np.array([s.t for s in samples])
-    raw = np.full(len(samples), np.nan)
+    faces: list[Face | None] = []
     previous: float | None = None
-    for i, sample in enumerate(samples):
-        subject = _select_subject(sample.faces, previous, crop_frac)
-        if subject is not None:
-            previous = subject[0]
-            raw[i] = _lean_towards_motion(subject[0], subject[1], sample, crop_frac)
+    for sample in samples:
+        face = _select_subject(sample.faces, previous, base)
+        faces.append(face)
+        if face is not None:
+            previous = face.cx
 
-    face_coverage = np.count_nonzero(~np.isnan(raw)) / len(raw)
-    if face_coverage == 0:
-        # No faces: follow the main moving element, but only if it moves in most
-        # of the shot. A few noisy samples (fades, animated logos, compression
-        # flicker) would otherwise shove the crop to the edge of a title card.
-        motion = np.array(
-            [s.motion_x if s.motion_x is not None and s.motion >= MIN_MOTION else np.nan for s in samples]
-        )
-        if np.count_nonzero(~np.isnan(motion)) / len(motion) >= MIN_MOTION_COVERAGE:
-            raw = motion
+    raw = np.full(len(samples), np.nan)
+    zoom = 0.0
+    if any(f is not None for f in faces):
+        # People: frame the whole body when it's a medium / wide shot.
+        spans = [_person_span(f, _nearest(samples, i, "persons")) if f else None for i, f in enumerate(faces)]
+        widths = [b - a for span in spans if span for a, b in [span]]
+        if len(widths) >= max(2, 0.3 * sum(f is not None for f in faces)):
+            zoom = _quantised_zoom(float(np.percentile(widths, ZOOM_PERCENTILE)), base, MAX_ZOOM_WITH_PERSON)
+            # A caption beside a person in a wide shot (a name, a place): if widening a bit more
+            # shows it untouched, that beats erasing and re-flowing it over the person's body.
+            together = []
+            for i, span in enumerate(spans):
+                text = _text_span(_nearest(samples, i, "text")) if span else None
+                if text:
+                    together.append(max(span[1], text[1]) - min(span[0], text[0]))
+            if len(together) >= 2 and max(together) <= zoomed_fraction(base, MAX_ZOOM_WITH_PERSON):
+                zoom = max(zoom, _quantised_zoom(max(together), base, MAX_ZOOM_WITH_PERSON))
+        crop = zoomed_fraction(base, zoom)
+        for i, (face, span) in enumerate(zip(faces, spans)):
+            if face is None:
+                continue
+            x = face.cx if span is None else (span[0] + span[1]) / 2
+            # Whatever else we frame, the face keeps a comfortable margin inside the crop.
+            room = max(0.0, crop / 2 - face.w / 2 - FACE_MARGIN_OF_CROP * crop)
+            raw[i] = float(np.clip(x, face.cx - room, face.cx + room))
+    else:
+        # No face: title cards and end screens are about their text.
+        spans = [_text_span(_nearest(samples, i, "text")) for i in range(len(samples))]
+        text_spans = [s for s in spans if s]
+        if text_spans and len(text_spans) >= 0.3 * len(samples):
+            widths = [b - a for a, b in text_spans]
+            zoom = _quantised_zoom(float(np.percentile(widths, TEXT_ZOOM_PERCENTILE)), base, MAX_ZOOM_TEXT_ONLY)
+            for i, span in enumerate(spans):
+                if span:
+                    raw[i] = (span[0] + span[1]) / 2
         else:
-            return np.full(len(samples), 0.5)
+            # Otherwise follow the main moving element, but only if it moves in most of
+            # the shot. A few noisy samples (fades, animated logos, compression flicker)
+            # would shove the crop to the edge of the frame.
+            motion = np.array(
+                [s.motion_x if s.motion_x is not None and s.motion >= MIN_MOTION else np.nan for s in samples]
+            )
+            if np.count_nonzero(~np.isnan(motion)) / len(motion) >= MIN_MOTION_COVERAGE:
+                raw = motion
+            else:
+                return np.full(len(samples), 0.5), 0.0
 
     filled = _fill_gaps(times, raw)
     filled = _median_filter(filled, max(3, int(MEDIAN_WINDOW_S * sample_fps) | 1))
-    return _gaussian(filled, GAUSSIAN_SIGMA_S * sample_fps)
+    return _gaussian(filled, GAUSSIAN_SIGMA_S * sample_fps), zoom
 
 
 def _follow(target: np.ndarray, dt: float, crop_frac: float) -> np.ndarray:
@@ -224,32 +313,37 @@ def _follow(target: np.ndarray, dt: float, crop_frac: float) -> np.ndarray:
 def build_camera_path(
     analysis: Analysis, width: int, height: int, text_layouts: tuple[TextLayout, ...] = ()
 ) -> CameraPath:
-    frac = crop_fraction(width, height)
-    half = frac / 2
+    base = crop_fraction(width, height)
     duration = analysis.duration
-    if frac >= 1.0 or not analysis.samples:
-        return CameraPath(times=[0.0, duration], xs=[0.5, 0.5], crop_fraction=frac, text_layouts=text_layouts)
+    if base >= 1.0 or not analysis.samples:
+        return CameraPath(times=[0.0, duration], xs=[0.5, 0.5], crop_fraction=base, text_layouts=text_layouts,
+                          zs=[0.0, 0.0])
 
     bounds = [0.0, *[c for c in analysis.scene_cuts if 0 < c < duration], duration]
     times_out: list[float] = []
     xs_out: list[float] = []
+    zs_out: list[float] = []
     dt = 1 / PATH_FPS
 
     for start, end in zip(bounds[:-1], bounds[1:]):
         shot = [s for s in analysis.samples if start <= s.t < end]
         if not shot:
             continue
-        target = _shot_target(shot, frac, analysis.sample_fps)
+        target, zoom = _shot_plan(shot, base, analysis.sample_fps)
+        crop = zoomed_fraction(base, zoom)
+        half = crop / 2
         grid = np.arange(start, end, dt)
         if grid.size == 0:
             grid = np.array([start])
         upsampled = np.interp(grid, [s.t for s in shot], target)
-        cam = np.clip(_follow(upsampled, dt, frac), half, 1 - half)
+        cam = np.clip(_follow(upsampled, dt, crop), half, 1 - half)
 
         # Duplicate keyframes at the cut so interpolation jumps instead of panning.
         times_out.extend(grid.tolist())
         xs_out.extend(cam.tolist())
+        zs_out.extend([zoom] * grid.size)
         times_out.append(max(end - 1e-3, grid[-1]))
         xs_out.append(float(cam[-1]))
+        zs_out.append(zoom)
 
-    return CameraPath(times=times_out, xs=xs_out, crop_fraction=frac, text_layouts=text_layouts)
+    return CameraPath(times=times_out, xs=xs_out, crop_fraction=base, text_layouts=text_layouts, zs=zs_out)

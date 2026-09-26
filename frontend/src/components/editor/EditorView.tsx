@@ -293,7 +293,7 @@ export function EditorView({ initial }: { initial: Project }) {
       </div>
 
       {/* Players */}
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px] xl:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_300px] xl:grid-cols-[minmax(0,1fr)_340px]">
         <SourcePlayer
           ref={videoRef}
           src={api.videoUrl(project.id)}
@@ -317,8 +317,8 @@ export function EditorView({ initial }: { initial: Project }) {
         onSeek={seek}
       />
 
-      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="order-2 lg:order-1">
+      <div className="mt-4 grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="order-2 min-w-0 lg:order-1">
           <ClipList
             clips={clips}
             selectedId={selectedId}
@@ -337,7 +337,7 @@ export function EditorView({ initial }: { initial: Project }) {
             isExporting={isBusy}
           />
         </div>
-        <div className="order-1 lg:sticky lg:top-18 lg:order-2">
+        <div className="order-1 min-w-0 lg:sticky lg:top-18 lg:order-2">
           <ClipInspector
             clip={selected}
             index={selected ? clips.indexOf(selected) : -1}

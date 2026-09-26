@@ -321,3 +321,96 @@ def test_legacy_fit_framing_becomes_zoom():
     assert clip.framing == "auto" and clip.zoom == 1.0
     with pytest.raises(ValidationError):
         Clip(start=0, end=5, zoom=1.5)
+
+
+# --- whole-person framing and auto zoom ---------------------------------------------
+
+
+def _with_person(analysis, box, every=0.4):
+    for s in analysis.samples:
+        if round(s.t / every, 6) % 1 == 0:
+            s.persons = [box]
+    return analysis
+
+
+def test_person_with_arms_out_is_zoomed_to_fit():
+    from app.services.person_detector import PersonBox
+
+    # Face at x=0.5 in a medium shot; arms and a held object span 0.28..0.78 (wider than the 0.32 crop).
+    analysis = _with_person(_analysis([0.5] * 50), PersonBox(0.28, 0.1, 0.5, 0.9, 0.9))
+    path = build_camera_path(analysis, 1920, 1080)
+    zoom = float(path.zoom_at(2.0))
+    visible = zoomed_width = 0.3164 + zoom * (1 - 0.3164)
+    assert zoomed_width >= 0.5 + 2 * 0.03 - 1e-6, "the whole person plus margin fits"
+    centre = float(path.at(2.0))
+    assert centre - visible / 2 <= 0.28 and centre + visible / 2 >= 0.78
+
+
+def test_close_up_is_not_zoomed_out():
+    from app.services.person_detector import PersonBox
+
+    analysis = _analysis([0.5] * 50)
+    for s in analysis.samples:
+        s.faces = [Face(0.5, 0.35, 0.2, 0.35, 0.9)]  # big face = close-up
+    _with_person(analysis, PersonBox(0.15, 0.0, 0.7, 1.0, 0.9))  # shoulders fill the frame
+    assert float(build_camera_path(analysis, 1920, 1080).zoom_at(2.0)) == 0.0
+
+
+def test_title_card_without_faces_zooms_to_show_all_text():
+    analysis = _with_text(_analysis([None] * 30), 0.0, 6.0, TextBox(0.1, 0.4, 0.7, 0.1))
+    path = build_camera_path(analysis, 1920, 1080)
+    visible = 0.3164 + float(path.zoom_at(3.0)) * (1 - 0.3164)
+    assert visible >= 0.7 + 2 * 0.03 - 1e-6
+
+
+def test_zoom_is_constant_within_a_shot():
+    from app.services.person_detector import PersonBox
+
+    analysis = _with_person(_analysis([0.5] * 50), PersonBox(0.28, 0.1, 0.5, 0.9, 0.9))
+    path = build_camera_path(analysis, 1920, 1080)
+    assert len(set(path.zs)) == 1, "no zoom breathing inside a shot"
+
+
+# --- word gaps ----------------------------------------------------------------
+
+
+def _mask_with_gaps(gap_widths, letter=20, height=30):
+    columns = [np.ones((height, letter), np.uint8)]
+    for g in gap_widths:
+        columns += [np.zeros((height, g), np.uint8), np.ones((height, letter), np.uint8)]
+    return np.hstack(columns)
+
+
+def test_one_word_in_a_wide_font_is_never_split():
+    from app.services.text_layout import _word_gaps
+
+    assert _word_gaps(_mask_with_gaps([6, 7, 6, 6, 7, 6]), letter_h=30) == []
+
+
+def test_word_spaces_are_found_between_letter_spacing():
+    from app.services.text_layout import _word_gaps
+
+    cuts = _word_gaps(_mask_with_gaps([2, 2, 9, 2, 2, 9, 2]), letter_h=30)
+    assert len(cuts) == 2
+
+
+def test_medium_close_up_shoulders_do_not_trigger_zoom():
+    from app.services.person_detector import PersonBox
+
+    analysis = _analysis([0.5] * 50)
+    for s in analysis.samples:
+        s.faces = [Face(0.55, 0.25, 0.096, 0.17, 0.9)]  # a talking head just under the close-up size
+    _with_person(analysis, PersonBox(0.37, 0.1, 0.38, 0.9, 0.9))  # box = shoulders (~4 face widths)
+    assert float(build_camera_path(analysis, 1920, 1080).zoom_at(2.0)) == 0.0
+
+
+def test_name_caption_in_a_wide_shot_is_kept_by_zooming_not_reflowed():
+    from app.services.person_detector import PersonBox
+
+    analysis = _with_person(_analysis([0.5] * 50), PersonBox(0.44, 0.1, 0.12, 0.85, 0.9))  # full-body shot
+    for s in analysis.samples:
+        s.faces = [Face(0.5, 0.2, 0.03, 0.05, 0.9)]
+    _with_text(analysis, 0.0, 10.0, TextBox(0.31, 0.8, 0.38, 0.07))  # "Name Surname" lower third
+    path = build_camera_path(analysis, 1920, 1080)
+    visible = 0.3164 + float(path.zoom_at(3.0)) * (1 - 0.3164)
+    assert visible >= 0.38, "wide enough to show the caption untouched"

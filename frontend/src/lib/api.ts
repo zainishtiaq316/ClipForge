@@ -48,6 +48,8 @@ export interface TextLineData {
   boxed: boolean
   bg: number[] // BGR
   ink: number
+  fg?: number[] // letters' colour (BGR) for text that isn't on a caption box
+  core?: [number, number] // where the letters are across the rect (0..1); the rest is padding
 }
 
 /** Overlay text on screen from `start` to `end`, re-flowed into the vertical frame. */
@@ -62,6 +64,8 @@ export interface CameraPathData {
   crop_fraction: number
   times: number[]
   xs: number[]
+  /** Automatic zoom-out per keyframe (whole person / title card in frame). */
+  zs?: number[]
   text_layouts: TextLayoutData[]
 }
 

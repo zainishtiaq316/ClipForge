@@ -14,7 +14,7 @@ function stepsFor(project: Project): Step[] {
     project.source_type === 'youtube'
       ? { label: 'Download', detail: 'Fetching the video from YouTube' }
       : { label: 'Upload', detail: 'Video received' },
-    { label: 'Analyze', detail: 'Detecting scenes, pauses in speech, faces and on-screen text' },
+    { label: 'Analyze', detail: 'Detecting scenes, pauses in speech, people and on-screen text' },
     { label: 'Plan clips', detail: 'Splitting into clips and planning the 9:16 framing' },
   ]
 }

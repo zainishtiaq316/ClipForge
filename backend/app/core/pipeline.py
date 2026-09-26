@@ -11,6 +11,7 @@ from ..schemas import Clip, MediaInfoOut, Project
 from ..services import analyzer, ffmpeg, reframer, segmenter, text_layout
 from ..services.downloader import DownloadError, download_youtube
 from ..services.face_detector import FaceDetector
+from ..services.person_detector import PersonDetector
 from ..services.text_detector import TextDetector
 from .storage import store
 
@@ -102,10 +103,10 @@ def process_project(project_id: str) -> None:
             _make_preview(source, folder / "preview.mp4", info)
             store.update(project_id, preview_file="preview.mp4")
 
-        _stage(project_id, "analyzing", "Finding scenes, pauses, faces and on-screen text")
+        _stage(project_id, "analyzing", "Finding scenes, pauses, people and on-screen text")
         text_detector = TextDetector(settings.models_dir)
         result = analyzer.analyze(
-            source, info, FaceDetector(settings.models_dir), text_detector,
+            source, info, FaceDetector(settings.models_dir), text_detector, PersonDetector(settings.models_dir),
             sample_fps=settings.analysis_fps, width=settings.analysis_width, progress=_Throttle(project_id),
         )
         store.write_json(project_id, "analysis.json", result.to_dict())

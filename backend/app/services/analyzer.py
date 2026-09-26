@@ -10,8 +10,9 @@ frame we collect:
 * **motion centroid**: where pixels changed, used as the "key element"
   fallback for shots with no visible face (products, screen recordings,
   B-roll);
-* **on-screen text** (PP-OCRv3, every ``TEXT_INTERVAL_S``): overlays, captions,
-  slides and title cards, so they can be shown whole instead of cropped.
+* **on-screen text** (PP-OCRv3) and **people** (NanoDet, whole body incl. arms),
+  every ``TEXT_INTERVAL_S``: so text can be kept whole and gesturing hands or held
+  objects stay in the frame.
 
 Decoding at 5 fps x 640 px makes a 20 minute 1080p video take roughly a minute
 instead of decoding all ~36 000 full-resolution frames.
@@ -33,6 +34,7 @@ import numpy as np
 
 from . import ffmpeg
 from .face_detector import Face, FaceDetector
+from .person_detector import PersonBox, PersonDetector
 from .text_detector import TextBox, TextDetector
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ class Sample:
     motion_x: float | None  # normalised x of motion centroid, None if static
     motion: float  # fraction of pixels that changed
     text: list[TextBox] | None = None  # None = text detection didn't run on this sample
+    persons: list[PersonBox] | None = None  # None = person detection didn't run on this sample
 
 
 @dataclass
@@ -72,6 +75,7 @@ class Analysis:
                     "mx": s.motion_x,
                     "f": [[round(v, 4) for v in asdict(f).values()] for f in s.faces],
                     "tx": None if s.text is None else [[round(v, 4) for v in asdict(b).values()] for b in s.text],
+                    "ps": None if s.persons is None else [[round(v, 4) for v in asdict(p).values()] for p in s.persons],
                 }
                 for s in self.samples
             ],
@@ -92,6 +96,7 @@ class Analysis:
                     motion_x=s["mx"],
                     faces=[Face(*f) for f in s["f"]],
                     text=None if s.get("tx") is None else [TextBox(*b) for b in s["tx"]],
+                    persons=None if s.get("ps") is None else [PersonBox(*p) for p in s["ps"]],
                 )
                 for s in data["samples"]
             ],
@@ -185,6 +190,7 @@ def analyze(
     info: ffmpeg.MediaInfo,
     detector: FaceDetector,
     text_detector: TextDetector | None = None,
+    person_detector: PersonDetector | None = None,
     sample_fps: int = 5,
     width: int = 640,
     progress: ProgressFn | None = None,
@@ -212,6 +218,7 @@ def analyze(
     prev_gray: np.ndarray | None = None
     text_every = max(1, round(TEXT_INTERVAL_S * sample_fps))
     detect_text = text_detector is not None and text_detector.available
+    detect_people = person_detector is not None and person_detector.available
     index = 0
     try:
         assert proc.stdout is not None
@@ -237,9 +244,12 @@ def analyze(
                     xs = np.arange(column_energy.size, dtype=np.float32)
                     motion_x = float((column_energy * xs).sum() / column_energy.sum() / column_energy.size)
 
-            text = text_detector.detect(frame) if detect_text and index % text_every == 0 else None
+            slow_pass = index % text_every == 0  # the heavier detectors run every TEXT_INTERVAL_S
+            text = text_detector.detect(frame) if detect_text and slow_pass else None
+            persons = person_detector.detect(frame) if detect_people and slow_pass else None
             result.samples.append(
-                Sample(t=t, faces=detector.detect(frame), motion_x=motion_x, motion=round(motion, 4), text=text)
+                Sample(t=t, faces=detector.detect(frame), motion_x=motion_x, motion=round(motion, 4), text=text,
+                       persons=persons)
             )
             times.append(t)
             scores.append(score)

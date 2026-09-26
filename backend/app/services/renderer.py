@@ -8,8 +8,10 @@ generating huge expression strings, so rendering is a three-process pipeline:
 Every output frame is the full-height 9:16 window that follows the subject. Two
 things can change that:
 
-* **zoom out** (per clip, chosen by the user): a wider window is shown and the
-  space above and below is filled with solid black (never blurred);
+* **zoom out**: automatic (the camera path widens the window when a person with
+  outstretched arms or a title card doesn't fit) or chosen by the user per clip;
+  the wider window leaves space above and below, filled with solid black (never
+  blurred);
 * **on-screen text** that the crop would cut: if it fits in the window, the
   window shifts a little to include it; otherwise it is erased and re-flowed
   into the frame by ``text_layout``.
@@ -68,22 +70,29 @@ def render_vertical_clip(
         raise ValueError("Clip end must be after its start")
 
     src_w, src_h = info.width, info.height
-    crop_w = crop_width(src_w, src_h, zoom)
-    # A portrait source can be taller than 9:16; then crop its height instead.
-    crop_h = src_h if crop_w < src_w or src_h * 9 <= src_w * 16 else int(round(src_w * 16 / 9 / 2)) * 2
     fps = info.fps
     frame_bytes = src_w * src_h * 3
     total_frames = max(1, int(round(duration * fps)))
+    frame_times = start + np.arange(total_frames) / fps
+
+    # Zoom per frame: the user's zoom, or more if Smart framing needs it to keep a person / title card whole.
+    zooms = np.full(total_frames, float(zoom))
+    if framing == "auto":
+        zooms = np.maximum(zooms, path.zoom_at(frame_times))
+    widths = np.array([crop_width(src_w, src_h, float(z)) for z in zooms])
+    base_w = crop_width(src_w, src_h, 0.0)
+    # A portrait source can be taller than 9:16; then crop its height instead.
+    crop_h = src_h if base_w < src_w or src_h * 9 <= src_w * 16 else int(round(src_w * 16 / 9 / 2)) * 2
 
     # Pre-compute the crop window of every output frame.
-    frame_times = start + np.arange(total_frames) / fps
-    follows_subject = framing in ("auto", "track") and crop_w < src_w
+    follows_subject = framing in ("auto", "track") and base_w < src_w
     centres = path.at(frame_times) if follows_subject else np.full(total_frames, 0.5)
-    offsets = np.clip(np.round(centres * src_w - crop_w / 2), 0, src_w - crop_w).astype(int)
+    offsets = np.clip(np.round(centres * src_w - widths / 2), 0, src_w - widths).astype(int)
     y0 = (src_h - crop_h) // 2
 
     reflow_text = framing == "auto" and any(lay.start < end and lay.end > start for lay in path.text_layouts)
-    with_bars = zoom > 0  # composed at output size; otherwise frames stay at crop size and FFmpeg upscales
+    with_bars = bool((zooms > 0).any())  # composed at output size; else crop size and FFmpeg upscales
+    crop_w = int(widths[0])  # constant whenever with_bars is False
 
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_suffix(".part.mp4")
@@ -132,6 +141,7 @@ def render_vertical_clip(
                 break
             frame = np.frombuffer(buf, dtype=np.uint8).reshape(src_h, src_w, 3)
             x0 = int(offsets[written])
+            crop_w = int(widths[written])
             t = float(frame_times[written])
             layout = path.text_at(t) if reflow_text else None
             text_fits = False

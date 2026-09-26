@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react'
 import { Crosshair, Smartphone } from 'lucide-react'
 import type { CameraPathData, Clip } from '../../lib/api'
-import { bgrToCss, frameLayout, layoutOps, videoHeight, videoTop, type View } from '../../lib/textLayout'
+import { drawTextOps, frameLayout, layoutOps, videoHeight, videoTop, type View } from '../../lib/textLayout'
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -51,17 +51,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         ctx.drawImage(video, x0, 0, cropW, srcH, 0, top, CANVAS_W, vh)
 
         // On-screen text the crop would cut: erase the cut original, draw it re-flowed.
-        if (layout) {
-          for (const op of layoutOps(layout.lines, view)) {
-            ctx.fillStyle = bgrToCss(op.line.bg)
-            if (op.erase) {
-              const pad = 0.15 * op.erase[3]
-              ctx.fillRect(op.erase[0], op.erase[1] - pad, op.erase[2], op.erase[3] + 2 * pad)
-            }
-            if (op.plate) ctx.fillRect(...op.plate)
-            for (const { src, dst } of op.pastes) ctx.drawImage(video, ...src, ...dst)
-          }
-        }
+        if (layout) drawTextOps(ctx, video, layoutOps(layout.lines, view))
 
         if (labelRef.current) labelRef.current.textContent = active ? active.title || 'Clip' : 'Outside clips'
       }
@@ -80,7 +70,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         <span className="flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
           <Crosshair className="size-3" />
           {FRAMING_LABEL[selected?.framing ?? 'auto']}
-          {selected && selected.zoom > 0 ? ` · zoom out ${Math.round(selected.zoom * 100)}%` : ''}
+          {selected && selected.zoom > 0 ? ` · zoom out ≥ ${Math.round(selected.zoom * 100)}%` : ''}
         </span>
       </div>
       <div className="mx-auto w-full max-w-[220px] sm:max-w-[260px] lg:max-w-[calc(56vh*0.5625)]">
