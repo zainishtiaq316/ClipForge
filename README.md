@@ -2,6 +2,7 @@
 
 ClipForge turns a long horizontal (16:9) video into short vertical (9:16) clips for TikTok, Reels and Shorts.
 It splits the video at natural pauses, **tracks the speaker** so they stay in frame (no fixed center crop),
+**keeps on-screen text readable** (captions, titles and slides are shown whole instead of being cut in half),
 lets you fine-tune every clip in a visual editor, and exports 1080×1920 MP4 files one by one or all at once as a ZIP.
 
 It runs **100% locally** and uses only free, open-source tools: no API keys, no accounts, no paid services.
@@ -14,13 +15,13 @@ It runs **100% locally** and uses only free, open-source tools: no API keys, no 
 |---|---|---|
 | 1 | Accept a YouTube URL or an uploaded video file (16:9) | Drag & drop / browse upload (MP4, MOV, MKV, WEBM, AVI) **or** paste a YouTube link (downloaded with `yt-dlp`, up to 1080p). |
 | 2 | Automatically segment the full video, with manual adjustment of start/end | The whole video is covered with clips cut at **pauses in speech** and **scene changes**, near a target length you choose (15-90 s). Adjust with draggable timeline handles (snap to scene cuts), typed times, ±1 s buttons, "set to playhead", split, add, delete or re-split. |
-| 3 | Convert 16:9 → 9:16 keeping the subject in frame | Faces are detected with **YuNet** (OpenCV) and followed by a smoothed "virtual camera". Shots with no face follow the main moving element. A live preview shows the result before exporting. Per-clip override: *Auto-track*, *Center* or *Fit + blur*. |
+| 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, slides, end screens) is detected with **PP-OCRv3**; when it's too wide for a 9:16 crop, those seconds switch to a *fit* layout (whole frame over a blurred background) so the text is never cut. A live preview shows the result before exporting. Per-clip framing: *Smart* (default), *Track*, *Center* or *Fit*. |
 | 4 | Export clips one by one, or all at once | "Export" on any clip downloads an MP4. "Export all" (or select several) downloads a ZIP. |
 | 5 | Adjust clip length (extend or shorten) before exporting | "Extend 5s" / "Shorten 5s", length presets (15/30/45/60 s), drag handles, or type exact times. |
 | ● | Free & open-source only | FFmpeg, OpenCV, YuNet, yt-dlp, FastAPI, React. See [Tech stack](#tech-stack). |
 | ● | Runs locally with clear setup | One double-click launcher (`start.bat` / `start.sh`) or Docker. |
 | ● | Usable by a non-developer | Guided UI with drag & drop, progress steps, plain-English errors, autosave, tooltips and keyboard shortcuts. |
-| ● | Readable, organized code | Small single-purpose modules, typed API models, 33 automated tests. |
+| ● | Readable, organized code | Small single-purpose modules, typed API models, 39 automated tests, lint-clean (ruff, oxlint). |
 
 ---
 
@@ -70,11 +71,18 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 ## 🎬 How to use it
 
 1. **Add a video.** Drop a file or paste a YouTube link, pick a target clip length, and click **Create vertical clips**.
-2. **Wait for the analysis.** A progress screen shows each step (a 10-minute video takes roughly a minute).
+2. **Wait for the analysis.** A progress screen shows each step (a 10-minute video takes about two minutes).
 3. **Review the clips.** The left player shows the original with the **9:16 crop window** moving over it;
    the phone frame on the right is a **live vertical preview**.
 4. **Adjust.** Select a clip, then drag its edges on the timeline, type exact times, or use *Extend / Shorten*.
-   Change *Framing* if needed. Changes save automatically.
+   Change *Framing* if needed. Changes save automatically. Blue marks above the timeline show on-screen text.
+
+   | Framing | What it does |
+   |---|---|
+   | **Smart** (default) | Follows the speaker, and switches to the fit layout while wide on-screen text is visible |
+   | **Track** | Always a 9:16 crop following the speaker or main moving element, even over text |
+   | **Center** | Fixed crop from the middle of the frame |
+   | **Fit** | Whole frame over a blurred background for the entire clip (slides, wide group shots) |
 5. **Export.** Click the download icon on a clip for a single MP4, or **Export all** for a ZIP.
 
 **Keyboard shortcuts:** `Space` play/pause · `←/→` seek 1 s (`Shift` = 5 s) · `I` / `O` set start/end to the playhead ·
@@ -95,6 +103,7 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
             │  • YuNet face detection                       │
             │  • HSV frame difference → scene cuts          │
             │  • motion centroid (no-face fallback)         │
+            │  • PP-OCRv3 on-screen text (every 0.4 s)      │
             │ FFmpeg audio → RMS loudness → speech pauses   │
             └──────────────┬───────────────────────────────┘
                            ▼
@@ -126,11 +135,16 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 - **Virtual camera:** a **dead zone** ignores small movements, then proportional follow with **velocity and
   acceleration limits**. At a **scene cut the camera re-anchors instantly** instead of panning across the edit.
 - **No face?** It follows the main moving element if it moves in most of the shot; otherwise it stays centered.
+- **On-screen text:** only *lines* of text count (wide and thin, so T-shirt prints and logos are ignored). When a line is
+  wider than the 9:16 window, or a shot shows text but no face, those seconds use the **fit layout**. Text shorter than
+  1 s is ignored, short gaps are bridged, switches snap outward to scene cuts, and mid-shot switches get a 0.25 s
+  crossfade. On the test video this found all 6 overlays (5 numbered tips and the end screen) with no false positives.
 - The same camera path drives the **browser preview** and the **final render**, so the preview matches the export.
 
 ### Rendering
 FFmpeg decodes the clip → Python crops each frame (a zero-copy NumPy slice following the camera path) → FFmpeg scales
-to 1080×1920 and encodes H.264 + AAC with `+faststart`. Audio is trimmed from the source with the same timestamps.
+to 1080×1920 and encodes H.264 + AAC with `+faststart`. Clips that include fit sections are composed at 1080×1920 in
+Python with OpenCV (blur on a 1/8-size copy for speed). Audio is trimmed from the source with the same timestamps.
 Renders are cached by a hash of (start, end, framing, encoder settings), so "Export all" reuses clips already exported.
 
 ---
@@ -176,7 +190,8 @@ cd backend
 .venv/Scripts/python -m pytest -q      # macOS/Linux: .venv/bin/python -m pytest -q
 ```
 
-33 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
+39 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
+text-aware layout rules (wide captions, ignored T-shirt text, flashes, cut snapping), the real text detector,
 URL validation (including SSRF attempts), clip validation, and a full **end-to-end API run**: a synthetic video is
 uploaded, analysed, edited, re-split and exported (single MP4, *Fit* framing and ZIP), and the output is checked to be
 9:16 with audio and the right duration. No network access is needed.
@@ -207,10 +222,11 @@ backend/
       downloader.py        yt-dlp + URL validation
       analyzer.py          one-pass faces / scenes / motion + pause detection
       face_detector.py     YuNet with Haar fallback
+      text_detector.py     PP-OCRv3 on-screen text detection
       segmenter.py         automatic clip boundaries
       reframer.py          subject selection + virtual camera path
       renderer.py          9:16 render pipeline
-  models/                YuNet ONNX weights (MIT)
+  models/                YuNet (MIT) and PP-OCRv3 (Apache-2.0) ONNX weights
   tests/                 unit + end-to-end API tests
 frontend/
   src/
@@ -218,6 +234,7 @@ frontend/
     hooks/               routing, export polling
     components/home/     upload / YouTube import, recent projects
     components/editor/   player + crop overlay, live 9:16 preview, timeline, clip list, inspector, export tray
+docs/ENGINEERING_NOTES.md  Design decisions, trade-offs and security in depth
 start.bat / start.sh     One-click launchers
 Dockerfile, docker-compose.yml
 ```
@@ -230,7 +247,7 @@ All free and open source:
 
 | Layer | Tools (license) |
 |---|---|
-| Video | FFmpeg (LGPL/GPL, via `imageio-ffmpeg`), OpenCV (Apache-2.0), YuNet model (MIT), NumPy (BSD) |
+| Video | FFmpeg (LGPL/GPL, via `imageio-ffmpeg`), OpenCV (Apache-2.0), YuNet face model (MIT), PP-OCRv3 text model (Apache-2.0), NumPy (BSD) |
 | Download | yt-dlp (Unlicense) |
 | Backend | Python, FastAPI (MIT), Uvicorn (BSD), Pydantic (MIT) |
 | Frontend | React 19 (MIT), TypeScript, Vite (MIT), Tailwind CSS 4 (MIT), Lucide icons (ISC) |
@@ -239,12 +256,16 @@ All free and open source:
 
 ## ⚖️ Trade-offs & limitations
 
+The full reasoning is in **[docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md)**. In short:
+
 - **Local JSON store instead of a database:** a single-user local tool doesn't need one, and files stay inspectable. A
   multi-user deployment would move to Postgres plus a proper job queue (e.g. Redis/RQ) for horizontal scaling.
 - **In-process thread pools instead of a job queue:** simple and dependency-free. Running jobs don't survive a
   restart (they are marked as failed with a clear message).
 - **Python frame piping for the render:** FFmpeg's `crop` filter can't follow an arbitrary per-frame path without
   enormous expressions. Piping costs a little speed (~3× real-time on a laptop for 1080p) but is exact and simple.
+- **Readable text over a bigger face:** while wide text is on screen, the fit layout makes the speaker smaller for
+  those seconds. Cut text looks broken; a brief layout change looks deliberate. *Track* framing opts out per clip.
 - **Speaker choice by face size and continuity**, not by who is talking. Active-speaker detection (lip movement +
   audio) would improve two-person podcasts; users can switch a clip to *Center* or *Fit + blur* meanwhile.
 - **Segmentation is structural (pauses and cuts), not semantic.** A free local speech-to-text model (e.g. Whisper)

@@ -14,7 +14,7 @@ function stepsFor(project: Project): Step[] {
     project.source_type === 'youtube'
       ? { label: 'Download', detail: 'Fetching the video from YouTube' }
       : { label: 'Upload', detail: 'Video received' },
-    { label: 'Analyze', detail: 'Detecting scenes, pauses in speech and faces' },
+    { label: 'Analyze', detail: 'Detecting scenes, pauses in speech, faces and on-screen text' },
     { label: 'Plan clips', detail: 'Splitting into clips and planning the 9:16 framing' },
   ]
 }
@@ -84,7 +84,7 @@ export function ProcessingView({ project }: { project: Project }) {
               })}
             </ol>
             <p className="mt-7 text-xs text-subtle">
-              A 10-minute video usually takes about a minute. You can leave this page open; it updates automatically.
+              A 10-minute video usually takes about two minutes. You can leave this page open; it updates automatically.
             </p>
           </>
         )}

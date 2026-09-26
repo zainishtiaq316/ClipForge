@@ -7,6 +7,7 @@ interface Props {
   duration: number
   clips: Clip[]
   sceneCuts: number[]
+  fitRanges: [number, number][]
   selectedId: string | null
   videoRef: RefObject<HTMLVideoElement | null>
   onSelect: (id: string) => void
@@ -23,7 +24,7 @@ const ZOOMS = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32]
 
 type Drag = { kind: 'scrub' } | { kind: 'start' | 'end'; id: string; snaps: number[] }
 
-export function Timeline({ duration, clips, sceneCuts, selectedId, videoRef, onSelect, onChange, onSeek, className = '' }: Props) {
+export function Timeline({ duration, clips, sceneCuts, fitRanges, selectedId, videoRef, onSelect, onChange, onSeek, className = '' }: Props) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
@@ -147,7 +148,8 @@ export function Timeline({ duration, clips, sceneCuts, selectedId, videoRef, onS
       <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2 sm:px-4">
         <h2 className="text-sm font-semibold">Timeline</h2>
         <p className="hidden text-xs text-subtle md:block">
-          Click to seek · drag a clip's edges to trim or extend · <kbd className="font-mono">Alt</kbd> disables snapping
+          Click to seek · drag a clip's edges to trim or extend · <kbd className="font-mono">Alt</kbd> disables snapping ·{' '}
+          <span className="text-sky-400">━</span> on-screen text
         </p>
         <div className="flex-1" />
         <button
@@ -207,6 +209,16 @@ export function Timeline({ duration, clips, sceneCuts, selectedId, videoRef, onS
               </div>
             ))}
           </div>
+
+          {/* On-screen text: these moments switch to the fit layout in "Smart" framing */}
+          {fitRanges.map(([start, end]) => (
+            <div
+              key={start}
+              className="absolute z-10 h-1 rounded-full bg-sky-400/80"
+              style={{ left: start * pps, width: Math.max(3, (end - start) * pps), top: RULER_H + 3 }}
+              title={`On-screen text ${formatTime(start)} – ${formatTime(end)}: shown full-frame so it isn't cut`}
+            />
+          ))}
 
           {/* Track */}
           <div className="absolute inset-x-0" style={{ top: RULER_H + 9, height: TRACK_H }}>

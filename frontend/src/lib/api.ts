@@ -2,7 +2,7 @@
 // proxied by Vite in development and served by FastAPI in production.
 
 export type ProjectStatus = 'queued' | 'downloading' | 'analyzing' | 'ready' | 'failed'
-export type Framing = 'auto' | 'center' | 'fit'
+export type Framing = 'auto' | 'track' | 'center' | 'fit'
 
 export interface MediaInfo {
   duration: number
@@ -41,6 +41,8 @@ export interface CameraPathData {
   crop_fraction: number
   times: number[]
   xs: number[]
+  /** Time ranges where on-screen text is too wide for a crop, shown with the fit layout. */
+  fit_ranges: [number, number][]
 }
 
 export type ExportStatus = 'queued' | 'rendering' | 'packaging' | 'done' | 'failed'

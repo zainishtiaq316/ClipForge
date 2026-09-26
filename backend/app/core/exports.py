@@ -27,7 +27,7 @@ from .storage import store
 
 log = logging.getLogger(__name__)
 
-RENDER_VERSION = "v1"  # bump to invalidate cached renders after changing the renderer
+RENDER_VERSION = "v2"  # bump to invalidate cached renders after changing the renderer
 JOB_TTL_S = 6 * 3600
 
 # x264 already uses every core, so clips are rendered one at a time.

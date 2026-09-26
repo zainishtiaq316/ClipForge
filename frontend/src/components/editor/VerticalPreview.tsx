@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react'
 import { Crosshair, Smartphone } from 'lucide-react'
 import type { CameraPathData, Clip } from '../../lib/api'
-import { cropCenterAt, cropLeft } from '../../lib/cameraPath'
+import { cropCenterAt, cropLeft, isFitAt } from '../../lib/cameraPath'
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -9,6 +9,8 @@ interface Props {
   clips: Clip[]
   selected: Clip | null
 }
+
+const FRAMING_LABEL = { auto: 'Smart framing', track: 'Subject tracking', center: 'Centered', fit: 'Fit + blur' }
 
 const CANVAS_W = 540
 const CANVAS_H = 960
@@ -49,9 +51,9 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         const active = selected && t >= selected.start && t <= selected.end ? selected : clips.find((c) => t >= c.start && t < c.end)
         const vw = video.videoWidth
         const vh = video.videoHeight
-        if (active?.framing === 'fit') {
+        if (isFitAt(cameraPath, t, active?.framing ?? 'auto')) {
           drawFit(ctx, video, vw, vh)
-          if (labelRef.current) labelRef.current.textContent = active.title || 'Clip'
+          if (labelRef.current) labelRef.current.textContent = active ? active.title || 'Clip' : 'Outside clips'
           raf = requestAnimationFrame(draw)
           return
         }
@@ -79,7 +81,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         </span>
         <span className="flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
           <Crosshair className="size-3" />
-          {selected?.framing === 'center' ? 'Centered' : selected?.framing === 'fit' ? 'Fit + blur' : 'Auto-tracking'}
+          {FRAMING_LABEL[selected?.framing ?? 'auto']}
         </span>
       </div>
       <div className="mx-auto w-full max-w-[220px] sm:max-w-[260px] lg:max-w-[calc(56vh*0.5625)]">

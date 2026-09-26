@@ -9,7 +9,8 @@ from app.services import segmenter
 from app.services.analyzer import Analysis, Sample, detect_scene_cuts
 from app.services.downloader import normalize_youtube_url
 from app.services.face_detector import Face
-from app.services.reframer import build_camera_path, crop_fraction
+from app.services.reframer import CameraPath, build_camera_path, build_fit_ranges, crop_fraction
+from app.services.text_detector import TextBox
 
 # --- segmentation -------------------------------------------------------------
 
@@ -120,6 +121,51 @@ def test_sparse_motion_does_not_move_crop():
     assert np.allclose(path.xs, 0.5)
 
 
+def _with_text(analysis, start, end, box, every=0.4):
+    for s in analysis.samples:
+        if round(s.t / every, 6) % 1 == 0:
+            s.text = [box] if start <= s.t < end else []
+    return analysis
+
+
+CAPTION = TextBox(0.05, 0.85, 0.6, 0.06)  # a lower-third wider than the 9:16 window
+SHIRT_PRINT = TextBox(0.45, 0.7, 0.12, 0.06)  # short, blocky text on clothing
+
+
+def test_wide_caption_switches_to_fit_layout():
+    analysis = _with_text(_analysis([0.5] * 100), 6.0, 12.0, CAPTION)
+    ranges = build_fit_ranges(analysis, crop_fraction(1920, 1080))
+    assert len(ranges) == 1
+    start, end = ranges[0]
+    assert start <= 6.0 and end >= 12.0, "the whole caption must be covered"
+    assert end - start < 8.0
+
+
+def test_small_text_near_a_face_is_ignored():
+    analysis = _with_text(_analysis([0.5] * 100), 0.0, 20.0, SHIRT_PRINT)
+    assert build_fit_ranges(analysis, crop_fraction(1920, 1080)) == []
+
+
+def test_flashing_text_is_ignored():
+    analysis = _with_text(_analysis([0.5] * 100), 6.0, 6.5, CAPTION)
+    assert build_fit_ranges(analysis, crop_fraction(1920, 1080)) == []
+
+
+def test_fit_range_expands_to_scene_cut_but_never_shrinks():
+    analysis = _with_text(_analysis([0.5] * 100, cuts=[5.6, 12.6]), 6.0, 12.0, CAPTION)
+    (start, end), = build_fit_ranges(analysis, crop_fraction(1920, 1080))
+    assert start == pytest.approx(5.6) and end == pytest.approx(12.6)
+
+
+def test_camera_path_carries_fit_ranges_and_round_trips():
+    analysis = _with_text(_analysis([0.5] * 100), 6.0, 12.0, CAPTION)
+    path = build_camera_path(analysis, 1920, 1080)
+    assert path.fit_ranges
+    again = CameraPath.from_dict(path.to_dict())
+    assert again.fit_ranges == path.fit_ranges
+    assert again.fit_mask(np.array([9.0, 15.0])).tolist() == [True, False]
+
+
 def test_consistent_motion_is_followed_without_faces():
     # e.g. a product demo: the moving element sits at x=0.7 for the whole shot.
     analysis = _analysis([None] * 30)
@@ -171,3 +217,20 @@ def test_clip_validation():
     clip = Clip(start=0, end=5)
     with pytest.raises(ValidationError):
         ClipsUpdate(clips=[clip, clip])  # duplicate ids
+
+
+def test_text_detector_finds_a_caption_line():
+    from pathlib import Path
+
+    import cv2
+
+    from app.services.text_detector import TextDetector
+
+    frame = np.full((360, 640, 3), 40, dtype=np.uint8)
+    cv2.putText(frame, "Subscribe for more tips", (40, 320), cv2.FONT_HERSHEY_DUPLEX, 1.2, (255, 255, 255), 2)
+    detector = TextDetector(Path(__file__).resolve().parent.parent / "models")
+    assert detector.available
+    boxes = detector.detect(frame)
+    assert boxes, "caption not detected"
+    widest = max(boxes, key=lambda b: b.w)
+    assert widest.w > 0.5 and widest.y > 0.75, widest

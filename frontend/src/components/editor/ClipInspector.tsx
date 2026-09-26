@@ -1,5 +1,5 @@
 import { useState, type RefObject } from 'react'
-import { Crosshair, Download, Maximize, Minus, MousePointerClick, Play, Plus, Scissors, SquareDashed, Trash2, Timer } from 'lucide-react'
+import { Crosshair, Download, Maximize, Minus, Sparkles, MousePointerClick, Play, Plus, Scissors, SquareDashed, Trash2, Timer } from 'lucide-react'
 import type { Clip, Framing } from '../../lib/api'
 import { formatDuration, formatTime, parseTime } from '../../lib/time'
 import { Button } from '../ui/Button'
@@ -162,12 +162,13 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
 
       <div className="mt-5">
         <span className="mb-1.5 block text-xs font-medium text-muted">Framing</span>
-        <div className="grid grid-cols-3 gap-1 rounded-xl bg-surface-2 p-1">
+        <div className="grid grid-cols-4 gap-1 rounded-xl bg-surface-2 p-1">
           {(
             [
-              ['auto', 'Auto-track', Crosshair],
+              ['auto', 'Smart', Sparkles],
+              ['track', 'Track', Crosshair],
               ['center', 'Center', SquareDashed],
-              ['fit', 'Fit + blur', Maximize],
+              ['fit', 'Fit', Maximize],
             ] as [Framing, string, typeof Crosshair][]
           ).map(([value, label, Icon]) => (
             <button
@@ -184,8 +185,10 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
         </div>
         <p className="mt-1.5 text-[11px] text-subtle">
           {clip.framing === 'auto'
-            ? 'Follows the speaker, or the main moving element when no face is visible.'
-            : clip.framing === 'center'
+            ? 'Follows the speaker, and shows the whole frame whenever on-screen text would be cut.'
+            : clip.framing === 'track'
+              ? 'Always a 9:16 crop that follows the speaker (or main moving element), even over text.'
+              : clip.framing === 'center'
               ? 'A fixed crop from the middle of the frame.'
               : 'Shows the whole frame over a blurred background. Good for slides, titles and wide group shots.'}
         </p>

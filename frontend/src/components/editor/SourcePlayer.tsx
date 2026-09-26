@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type Ref, type RefObject } from 'react'
 import { Pause, Play, ScanFace, Volume2, VolumeX } from 'lucide-react'
 import type { CameraPathData, Framing, MediaInfo } from '../../lib/api'
-import { cropCenterAt, cropLeft } from '../../lib/cameraPath'
+import { cropCenterAt, cropLeft, isFitAt } from '../../lib/cameraPath'
 import { formatTime } from '../../lib/time'
 
 interface Props {
@@ -39,7 +39,7 @@ export function SourcePlayer({ ref, src, media, cameraPath, framing }: Props) {
       if (video) {
         const t = video.currentTime
         if (overlayRef.current && cameraPath) {
-          const frac = framing === 'fit' ? 1 : cameraPath.crop_fraction
+          const frac = isFitAt(cameraPath, t, framing) ? 1 : cameraPath.crop_fraction
           const left = cropLeft(cropCenterAt(cameraPath, t, framing), frac)
           overlayRef.current.style.left = `${left * 100}%`
           overlayRef.current.style.width = `${frac * 100}%`

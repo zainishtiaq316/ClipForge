@@ -16,9 +16,15 @@ Pipeline (per shot, where a shot is the span between two scene cuts):
    proportional speed and velocity/acceleration clamps. At a scene cut the
    camera re-anchors instantly instead of panning across the edit.
 
+5. **Text-aware layout**: when on-screen text (a caption, title overlay, slide)
+   is wider than the 9:16 window, or a shot shows text but no face, those
+   seconds switch to a *fit* layout (whole frame over a blurred background)
+   so the text is never cut in half. See ``build_fit_ranges``.
+
 The output is a list of ``(time, centre_x)`` keyframes in normalised source
-coordinates. The same path drives both the browser preview and the final
-render, so what the user sees is what they export.
+coordinates plus the time ranges that use the fit layout. The same data drives
+both the browser preview and the final render, so what the user sees is what
+they export.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import numpy as np
 
 from .analyzer import Analysis, Sample
 from .face_detector import Face
+from .text_detector import TextBox
 
 PATH_FPS = 10  # resolution of the stored camera path
 
@@ -46,6 +53,16 @@ MAX_GAP_S = 2.5  # longer gaps than this hold the last position instead of inter
 MEDIAN_WINDOW_S = 1.0
 GAUSSIAN_SIGMA_S = 0.45
 
+# Text-aware layout
+TEXT_LINE_MIN_ASPECT = 3.5  # a line of text is much wider than tall (ignores logos, T-shirt prints)
+TEXT_LINE_MIN_HEIGHT = 0.025  # ignore tiny text (watermarks, background signs)
+TEXT_BLOCK_MIN_AREA = 0.004  # enough text to be the point of a face-less shot
+FIT_MIN_S = 1.0  # ignore text that flashes by
+FIT_MERGE_GAP_S = 1.5  # bridge short gaps so the layout doesn't flicker
+FIT_PAD_S = 0.3
+FIT_SNAP_S = 0.6  # snap layout switches onto nearby scene cuts
+FIT_SHOT_MAJORITY = 0.6  # if most of a shot needs fit, use fit for the whole shot
+
 # Virtual camera (units: fraction of source width)
 DEAD_ZONE_OF_CROP = 0.12  # subject may drift 12% of the crop width before we move
 FOLLOW_GAIN = 2.5  # 1/s, how quickly the camera closes the gap
@@ -58,20 +75,36 @@ class CameraPath:
     times: list[float]
     xs: list[float]  # crop centre, normalised to source width
     crop_fraction: float
+    fit_ranges: tuple[tuple[float, float], ...] = ()  # time ranges shown with the fit layout
+    scene_cuts: tuple[float, ...] = ()  # layout switches on a cut are hard cuts, not crossfades
 
     def at(self, t: np.ndarray | float) -> np.ndarray:
         return np.interp(t, self.times, self.xs)
+
+    def fit_mask(self, t: np.ndarray) -> np.ndarray:
+        mask = np.zeros(np.shape(t), dtype=bool)
+        for start, end in self.fit_ranges:
+            mask |= (t >= start) & (t < end)
+        return mask
 
     def to_dict(self) -> dict:
         return {
             "crop_fraction": round(self.crop_fraction, 5),
             "times": [round(t, 3) for t in self.times],
             "xs": [round(x, 4) for x in self.xs],
+            "fit_ranges": [[round(a, 3), round(b, 3)] for a, b in self.fit_ranges],
+            "scene_cuts": [round(c, 3) for c in self.scene_cuts],
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> CameraPath:
-        return cls(times=data["times"], xs=data["xs"], crop_fraction=data["crop_fraction"])
+        return cls(
+            times=data["times"],
+            xs=data["xs"],
+            crop_fraction=data["crop_fraction"],
+            fit_ranges=tuple(tuple(r) for r in data.get("fit_ranges", [])),
+            scene_cuts=tuple(data.get("scene_cuts", [])),
+        )
 
 
 def crop_fraction(width: int, height: int) -> float:
@@ -181,12 +214,85 @@ def _follow(target: np.ndarray, dt: float, crop_frac: float) -> np.ndarray:
     return out
 
 
+def _needs_fit(text: list[TextBox], faces: list[Face], crop_frac: float) -> bool:
+    """Would a 9:16 crop cut important text in this frame?"""
+    lines = [b for b in text if b.h >= TEXT_LINE_MIN_HEIGHT and b.w / max(b.h, 1e-6) >= TEXT_LINE_MIN_ASPECT]
+    if any(line.w > crop_frac for line in lines):
+        return True  # a caption / title line wider than the crop can never fit
+    has_face = any(f.w >= MIN_FACE_WIDTH for f in faces)
+    text_area = sum(b.w * b.h for b in text if b.h >= TEXT_LINE_MIN_HEIGHT)
+    if not has_face and text_area >= TEXT_BLOCK_MIN_AREA:
+        left = min(b.x for b in text)
+        right = max(b.x + b.w for b in text)
+        return right - left > crop_frac * 0.9  # a slide / title card that doesn't fit in the crop
+    return False
+
+
+def _runs(times: list[float], flags: list[bool], step: float) -> list[list[float]]:
+    runs: list[list[float]] = []
+    for t, flag in zip(times, flags):
+        if not flag:
+            continue
+        if runs and t - runs[-1][1] <= step * 1.5:
+            runs[-1][1] = t + step
+        else:
+            runs.append([t, t + step])
+    return runs
+
+
+def build_fit_ranges(analysis: Analysis, crop_frac: float) -> list[tuple[float, float]]:
+    """Time ranges where on-screen text needs the whole frame (fit layout)."""
+    checked = [s for s in analysis.samples if s.text is not None]
+    if len(checked) < 2 or crop_frac >= 1.0:
+        return []
+    step = checked[1].t - checked[0].t
+    runs = _runs([s.t for s in checked], [_needs_fit(s.text or [], s.faces, crop_frac) for s in checked], step)
+
+    # Merge near-by runs, drop flashes, pad a little.
+    merged: list[list[float]] = []
+    for run in runs:
+        if merged and run[0] - merged[-1][1] <= FIT_MERGE_GAP_S:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+    ranges = [[a - FIT_PAD_S, b + FIT_PAD_S] for a, b in merged if b - a >= FIT_MIN_S]
+
+    # Layout switches look intentional when they happen on an edit. Only ever
+    # snap outwards: shrinking the range would cut text that is already visible.
+    cuts = analysis.scene_cuts
+    for r in ranges:
+        before = [c for c in cuts if r[0] - FIT_SNAP_S <= c <= r[0]]
+        after = [c for c in cuts if r[1] <= c <= r[1] + FIT_SNAP_S]
+        if before:
+            r[0] = max(before)
+        if after:
+            r[1] = min(after)
+
+    # A shot that is mostly text gets the fit layout for its whole length.
+    bounds = [0.0, *cuts, analysis.duration]
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        covered = sum(max(0.0, min(b, e) - max(a, s)) for s, e in ranges)
+        if b > a and covered / (b - a) >= FIT_SHOT_MAJORITY:
+            ranges.append([a, b])
+
+    ranges.sort()
+    out: list[list[float]] = []
+    for s, e in ranges:
+        s, e = max(0.0, s), min(analysis.duration, e)
+        if out and s <= out[-1][1] + 0.05:
+            out[-1][1] = max(out[-1][1], e)
+        elif e > s:
+            out.append([s, e])
+    return [(round(s, 3), round(e, 3)) for s, e in out]
+
+
 def build_camera_path(analysis: Analysis, width: int, height: int) -> CameraPath:
     frac = crop_fraction(width, height)
     half = frac / 2
     duration = analysis.duration
     if frac >= 1.0 or not analysis.samples:
         return CameraPath(times=[0.0, duration], xs=[0.5, 0.5], crop_fraction=frac)
+    fit_ranges = tuple(build_fit_ranges(analysis, frac))
 
     bounds = [0.0, *[c for c in analysis.scene_cuts if 0 < c < duration], duration]
     times_out: list[float] = []
@@ -210,4 +316,6 @@ def build_camera_path(analysis: Analysis, width: int, height: int) -> CameraPath
         times_out.append(max(end - 1e-3, grid[-1]))
         xs_out.append(float(cam[-1]))
 
-    return CameraPath(times=times_out, xs=xs_out, crop_fraction=frac)
+    return CameraPath(
+        times=times_out, xs=xs_out, crop_fraction=frac, fit_ranges=fit_ranges, scene_cuts=tuple(analysis.scene_cuts)
+    )

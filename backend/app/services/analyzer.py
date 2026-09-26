@@ -9,7 +9,9 @@ frame we collect:
   signal PySceneDetect's ContentDetector uses, with an adaptive threshold;
 * **motion centroid**: where pixels changed, used as the "key element"
   fallback for shots with no visible face (products, screen recordings,
-  B-roll).
+  B-roll);
+* **on-screen text** (PP-OCRv3, every ``TEXT_INTERVAL_S``): overlays, captions,
+  slides and title cards, so they can be shown whole instead of cropped.
 
 Decoding at 5 fps x 640 px makes a 20 minute 1080p video take roughly a minute
 instead of decoding all ~36 000 full-resolution frames.
@@ -31,6 +33,7 @@ import numpy as np
 
 from . import ffmpeg
 from .face_detector import Face, FaceDetector
+from .text_detector import TextBox, TextDetector
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +46,7 @@ class Sample:
     faces: list[Face]
     motion_x: float | None  # normalised x of motion centroid, None if static
     motion: float  # fraction of pixels that changed
+    text: list[TextBox] | None = None  # None = text detection didn't run on this sample
 
 
 @dataclass
@@ -67,6 +71,7 @@ class Analysis:
                     "m": s.motion,
                     "mx": s.motion_x,
                     "f": [[round(v, 4) for v in asdict(f).values()] for f in s.faces],
+                    "tx": None if s.text is None else [[round(v, 4) for v in asdict(b).values()] for b in s.text],
                 }
                 for s in self.samples
             ],
@@ -81,7 +86,13 @@ class Analysis:
             scene_cuts=list(data["scene_cuts"]),
             pauses=[tuple(s) for s in data["pauses"]],
             samples=[
-                Sample(t=s["t"], motion=s["m"], motion_x=s["mx"], faces=[Face(*f) for f in s["f"]])
+                Sample(
+                    t=s["t"],
+                    motion=s["m"],
+                    motion_x=s["mx"],
+                    faces=[Face(*f) for f in s["f"]],
+                    text=None if s.get("tx") is None else [TextBox(*b) for b in s["tx"]],
+                )
                 for s in data["samples"]
             ],
         )
@@ -166,11 +177,14 @@ def detect_pauses(path: Path, duration: float) -> list[tuple[float, float]]:
 
 # --- main pass --------------------------------------------------------------
 
+TEXT_INTERVAL_S = 0.4  # text changes slowly; ~40 ms per detection, so don't run it on every sample
+
 
 def analyze(
     path: Path,
     info: ffmpeg.MediaInfo,
     detector: FaceDetector,
+    text_detector: TextDetector | None = None,
     sample_fps: int = 5,
     width: int = 640,
     progress: ProgressFn | None = None,
@@ -196,6 +210,8 @@ def analyze(
     scores: list[float] = []
     prev_hsv: np.ndarray | None = None
     prev_gray: np.ndarray | None = None
+    text_every = max(1, round(TEXT_INTERVAL_S * sample_fps))
+    detect_text = text_detector is not None and text_detector.available
     index = 0
     try:
         assert proc.stdout is not None
@@ -221,8 +237,9 @@ def analyze(
                     xs = np.arange(column_energy.size, dtype=np.float32)
                     motion_x = float((column_energy * xs).sum() / column_energy.sum() / column_energy.size)
 
+            text = text_detector.detect(frame) if detect_text and index % text_every == 0 else None
             result.samples.append(
-                Sample(t=t, faces=detector.detect(frame), motion_x=motion_x, motion=round(motion, 4))
+                Sample(t=t, faces=detector.detect(frame), motion_x=motion_x, motion=round(motion, 4), text=text)
             )
             times.append(t)
             scores.append(score)

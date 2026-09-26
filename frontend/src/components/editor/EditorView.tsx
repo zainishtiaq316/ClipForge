@@ -309,6 +309,7 @@ export function EditorView({ initial }: { initial: Project }) {
         duration={duration}
         clips={clips}
         sceneCuts={project.scene_cuts}
+        fitRanges={cameraPath?.fit_ranges ?? []}
         selectedId={selectedId}
         videoRef={videoRef}
         onSelect={(id) => setSelectedId(id)}
