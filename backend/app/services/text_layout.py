@@ -54,6 +54,10 @@ SEGMENT_GAP = 0.18  # vertical gap between wrapped lines, relative to line heigh
 PLATE_PAD = 0.22  # caption-box padding around wrapped lines, relative to line height
 SAFE_TOP, SAFE_BOTTOM = 0.05, 0.95
 MIN_WRAP_SCALE = 0.85  # prefer fewer lines as long as the text stays at >= 85% of its natural size
+ROW_GAP = 0.6  # space between texts that share a row, relative to their height
+ROW_MIN_FIT = 0.6  # texts sharing a row may shrink this much to stay on one row
+TITLE_LETTER_HEIGHT = 0.13  # letters taller than this are a title graphic, not a caption: never cut it up
+BLOB_MAX_HEIGHT = 1.4  # a 'letter' taller than this x the typical letter is something else (a hand)
 BAR_TEXT_HEIGHT = 0.055  # text moved onto a zoom-out bar is at least this tall (fraction of output)
 WINDOW_SUBJECT_MARGIN = 0.15  # when shifting the window to fit text, the subject stays this far from its edges
 WINDOW_RAMP_S = 0.3  # ease the window shift in / out
@@ -508,71 +512,131 @@ def _block(line: TextLine, width: float, height: float, scale: float, max_w: flo
     return segments, line_s, seg_h, gap, len(segments) * seg_h + (len(segments) - 1) * gap
 
 
-def layout_ops(lines: tuple[TextLine, ...], view: View) -> list[LineOps]:
+def _entry(line: TextLine, view: View, max_w: float) -> dict | None:
+    """Where one line goes: wrapped segments, scale, and its anchor (on a bar if zoomed out)."""
     s = view.scale
-    max_w = MAX_LINE_WIDTH * view.out_w
     crop_x1 = view.crop_x0 + view.crop_w
     video_top, video_h = view.video_top, view.video_h
-    bar_top_h, bar_bottom_h = video_top, view.out_h - video_top - video_h
+    X, Y, W, H = line.x * view.src_w, line.y * view.src_h, line.w * view.src_w, line.h * view.src_h
+    if X >= view.crop_x0 - 1 and X + W <= crop_x1 + 1:
+        return None  # already fully visible in the crop: leave it untouched
+    if line.h / (1.0 if line.boxed else 1.5) > TITLE_LETTER_HEIGHT:
+        return None  # big display type (an animated title card): framing handles it, cutting it up never looks right
+    erase = None
+    vx0, vx1 = max(X, view.crop_x0), min(X + W, crop_x1)
+    if vx1 > vx0:
+        erase = (int((vx0 - view.crop_x0) * s), int(video_top + Y * s), int(math.ceil((vx1 - vx0) * s)),
+                 int(math.ceil(H * s)))
 
-    blocks = []
-    for line in lines:
-        X, Y, W, H = line.x * view.src_w, line.y * view.src_h, line.w * view.src_w, line.h * view.src_h
-        if X >= view.crop_x0 - 1 and X + W <= crop_x1 + 1:
-            continue  # already fully visible in the crop: leave it untouched
-        erase = None
-        vx0, vx1 = max(X, view.crop_x0), min(X + W, crop_x1)
-        if vx1 > vx0:
-            erase = (int((vx0 - view.crop_x0) * s), int(video_top + Y * s), int(math.ceil((vx1 - vx0) * s)),
-                     int(math.ceil(H * s)))
+    scale0 = s
+    segments, line_s, seg_h, gap, block_h = _block(line, W, H, s, max_w)
+    # Anchor where the text was; in zoomed-out frames, move it onto the free bar
+    # and let it grow there, since the video itself is smaller.
+    anchor = video_top + (Y + H / 2) * s
+    relative = (Y + H / 2) / view.src_h
+    bar_h = view.out_h - video_top - video_h if relative >= 0.5 else video_top
+    if bar_h > 0:
+        big = max(s, BAR_TEXT_HEIGHT * view.out_h / H)
+        for scale in (big, s):
+            candidate = _block(line, W, H, scale, max_w)
+            if candidate[4] * 1.25 <= bar_h:
+                segments, line_s, seg_h, gap, block_h = candidate
+                scale0 = scale
+                anchor = (video_top + video_h + bar_h / 2) if relative >= 0.5 else bar_h / 2
+                break
+    return {"line": line, "erase": erase, "segments": segments, "line_s": line_s, "seg_h": seg_h, "gap": gap,
+            "block_h": block_h, "anchor": anchor, "scale0": scale0, "X": X, "Y": Y, "W": W, "H": H}
 
-        segments, line_s, seg_h, gap, block_h = _block(line, W, H, s, max_w)
-        # Anchor where the text was; in zoomed-out frames, move it onto the free bar
-        # and let it grow there, since the video itself is smaller.
-        anchor = video_top + (Y + H / 2) * s
-        relative = (Y + H / 2) / view.src_h
-        bar_h = bar_bottom_h if relative >= 0.5 else bar_top_h
-        if bar_h > 0:
-            bigger = _block(line, W, H, max(s, BAR_TEXT_HEIGHT * view.out_h / H), max_w)
-            for candidate in (bigger, (segments, line_s, seg_h, gap, block_h)):
-                if candidate[4] * 1.25 <= bar_h:
-                    segments, line_s, seg_h, gap, block_h = candidate
-                    anchor = (video_top + video_h + bar_h / 2) if relative >= 0.5 else bar_h / 2
-                    break
-        blocks.append([line, erase, segments, line_s, seg_h, gap, block_h, anchor - block_h / 2])
+
+def _groups(entries: list[dict], max_w: float) -> list[dict]:
+    """Lines on the same row ("July 2017 ... Denver Colorado") stay side by side when they fit."""
+    rows: list[list[dict]] = []
+    for e in sorted(entries, key=lambda e: (e["Y"], e["X"])):
+        for row in rows:
+            r = row[0]
+            if min(e["Y"] + e["H"], r["Y"] + r["H"]) - max(e["Y"], r["Y"]) >= 0.5 * min(e["H"], r["H"]):
+                row.append(e)
+                break
+        else:
+            rows.append([e])
+
+    groups = []
+    for row in rows:
+        if len(row) > 1:
+            row.sort(key=lambda e: e["X"])
+            scale = min(e["scale0"] for e in row)
+            h_max = max(e["H"] for e in row)
+            total = sum(e["W"] for e in row) * scale + ROW_GAP * h_max * scale * (len(row) - 1)
+            fit = min(1.0, max_w / total)
+            if fit >= ROW_MIN_FIT:
+                scale *= fit
+                block_h = h_max * scale
+                anchor = sum(e["anchor"] for e in row) / len(row)
+                groups.append({"row": row, "scale": scale, "seg_h": block_h, "block_h": block_h,
+                               "top": anchor - block_h / 2})
+                continue
+        for e in row:
+            groups.append({"row": None, "entry": e, "seg_h": e["seg_h"], "block_h": e["block_h"],
+                           "top": e["anchor"] - e["block_h"] / 2})
+    return groups
+
+
+def layout_ops(lines: tuple[TextLine, ...], view: View) -> list[LineOps]:
+    max_w = MAX_LINE_WIDTH * view.out_w
+    entries = [e for e in (_entry(line, view, max_w) for line in lines) if e is not None]
+    groups = _groups(entries, max_w)
 
     # Keep blocks from overlapping each other and inside the safe area.
-    blocks.sort(key=lambda b: b[7])
-    for prev, cur in zip(blocks, blocks[1:]):
-        cur[7] = max(cur[7], prev[7] + prev[6] + prev[4] * 0.6)
-    if blocks:
-        overflow = blocks[-1][7] + blocks[-1][6] - SAFE_BOTTOM * view.out_h
-        shift = max(0.0, overflow)
-        top_room = blocks[0][7] - shift - SAFE_TOP * view.out_h
-        for b in blocks:
-            b[7] -= shift + min(0.0, top_room)
+    groups.sort(key=lambda g: g["top"])
+    for prev, cur in zip(groups, groups[1:]):
+        cur["top"] = max(cur["top"], prev["top"] + prev["block_h"] + prev["seg_h"] * 0.6)
+    if groups:
+        shift = max(0.0, groups[-1]["top"] + groups[-1]["block_h"] - SAFE_BOTTOM * view.out_h)
+        top_room = groups[0]["top"] - shift - SAFE_TOP * view.out_h
+        for g in groups:
+            g["top"] -= shift + min(0.0, top_room)
 
     ops = []
-    for line, erase, segments, line_s, seg_h, gap, block_h, top in blocks:
-        X, Y, W, H = line.x * view.src_w, line.y * view.src_h, line.w * view.src_w, line.h * view.src_h
+    for g in groups:
+        if g["row"]:
+            scale, top = g["scale"], g["top"]
+            widths = [e["W"] * scale for e in g["row"]]
+            gap_x = ROW_GAP * g["block_h"]
+            x = (view.out_w - sum(widths) - gap_x * (len(widths) - 1)) / 2
+            for e, w in zip(g["row"], widths):
+                h = e["H"] * scale
+                y = top + (g["block_h"] - h) / 2
+                paste = Paste(src=(int(e["X"]), int(e["Y"]), max(1, int(e["W"])), max(1, int(e["H"]))),
+                              dst=(int(x), int(y), max(1, int(w)), max(1, int(h))))
+                plate = None
+                if e["line"].boxed:
+                    pad = PLATE_PAD * h
+                    plate = (int(x - pad), int(y - pad), int(w + 2 * pad), int(h + 2 * pad))
+                ops.append(LineOps(line=e["line"], erase=e["erase"], plate=plate, pastes=[paste],
+                                   segments=[(0.0, 1.0)]))
+                x += w + gap_x
+            continue
+
+        e = g["entry"]
+        line, X, Y, W, H = e["line"], e["X"], e["Y"], e["W"], e["H"]
         pastes = []
-        y = top
+        y = g["top"]
         widest_px = 0.0
-        for a, b in segments:
+        for a, b in e["segments"]:
             src_w = (b - a) * W
-            dst_w = src_w * line_s
+            dst_w = src_w * e["line_s"]
             widest_px = max(widest_px, dst_w)
             pastes.append(Paste(
                 src=(int(X + a * W), int(Y), max(1, int(src_w)), max(1, int(H))),
-                dst=(int((view.out_w - dst_w) / 2), int(y), max(1, int(dst_w)), max(1, int(seg_h))),
+                dst=(int((view.out_w - dst_w) / 2), int(y), max(1, int(dst_w)), max(1, int(e["seg_h"]))),
             ))
-            y += seg_h + gap
+            y += e["seg_h"] + e["gap"]
         plate = None
         if line.boxed:
-            pad = PLATE_PAD * seg_h
-            plate = (int((view.out_w - widest_px) / 2 - pad), int(top - pad), int(widest_px + 2 * pad),
-                     int(block_h + 2 * pad))
-        ops.append(LineOps(line=line, erase=erase, plate=plate, pastes=pastes, segments=list(segments)))
+            pad = PLATE_PAD * e["seg_h"]
+            plate = (int((view.out_w - widest_px) / 2 - pad), int(g["top"] - pad), int(widest_px + 2 * pad),
+                     int(e["block_h"] + 2 * pad))
+        ops.append(LineOps(line=line, erase=e["erase"], plate=plate, pastes=pastes, segments=list(e["segments"])))
     return ops
 
 
@@ -601,6 +665,30 @@ def is_present(frame: np.ndarray, line: TextLine) -> bool:
     if now.std() < 1 or ref.std() < 1:
         return False
     return float(np.corrcoef(now, ref)[0, 1]) >= PRESENCE_MIN_CORR
+
+
+def _drop_blobs(mask: np.ndarray) -> np.ndarray:
+    """Trim shapes much taller than the letters (a hand or a sleeve crossing the text).
+
+    Only the part outside the band the letters occupy is removed, so a letter that
+    touches the hand (and became one shape with it) is kept.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count <= 2:
+        return mask
+    tops, heights = stats[1:, cv2.CC_STAT_TOP], stats[1:, cv2.CC_STAT_HEIGHT]
+    letters = heights >= 0.3 * mask.shape[0]
+    if not letters.any():
+        return mask
+    typical = float(np.median(heights[letters]))
+    band_top = int(np.percentile(tops[letters], 10)) - 1
+    band_bottom = int(np.percentile(tops[letters] + heights[letters], 90)) + 1
+    out = mask.copy()
+    for i in np.flatnonzero(heights > BLOB_MAX_HEIGHT * typical) + 1:
+        blob = labels == i
+        blob[max(0, band_top):band_bottom] = False  # keep whatever lies within the letter band
+        out[blob] = 0
+    return out
 
 
 def _covered_fraction(rect: tuple[int, int, int, int], op: LineOps) -> float:
@@ -664,7 +752,8 @@ def draw_ops(canvas: np.ndarray, frame: np.ndarray, ops: list[LineOps]) -> None:
                 canvas[y0:y1, x0:x1] = piece
             else:
                 # Text straight on video / a plain backdrop: paste only the letters.
-                letters = cv2.dilate(letter_mask(piece, op.line.bg, op.line.fg), np.ones((2, 2), np.uint8))
+                letters = _drop_blobs(letter_mask(piece, op.line.bg, op.line.fg))
+                letters = cv2.dilate(letters, np.ones((2, 2), np.uint8))
                 # Keep only columns inside the detected text (the padding may hold a shirt or a hand).
                 cols = seg_a + (np.arange(dw)[x0 - dx: x1 - dx] + 0.5) / dw * (seg_b - seg_a)
                 letters[:, (cols < op.line.core[0]) | (cols > op.line.core[1])] = 0

@@ -81,7 +81,10 @@ Consecutive detections of the same lines form a run; each run is measured once o
    them where the text was. In a zoomed-out clip, the text moves onto the free bar instead and is enlarged there.
 
 Because the actual pixels are reused (no OCR, no re-typing), the font, colours, caption box and even animations are
-preserved. The fingerprint check prevents pasting text while it is fading or sliding in, when the reference
+preserved. For text without a box only the letters move: they are selected by the letters' own colour (measured at
+planning time) and only inside the detected text area, so the person or stage behind them is left behind; a shape much
+taller than the letters (a hand crossing the text) is trimmed to the letter band. Texts sharing a row stay on one row,
+and big display type (title cards) is never cut up, because the card's shot is zoomed to show it whole. The fingerprint check prevents pasting text while it is fading or sliding in, when the reference
 rectangle would contain something else.
 
 *Trade-offs:*

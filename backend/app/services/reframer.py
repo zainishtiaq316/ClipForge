@@ -53,6 +53,7 @@ ARMS_OUT_RATIO = 4.5  # shoulders are ~3-4 face widths; a wider body box means a
 SHOULDERS_HEIGHT_RATIO = 6.0  # a body box under ~6 face heights is head-and-shoulders, not a full body
 PERSON_MARGIN = 0.03  # room left of and right of the person (fraction of frame width)
 TEXT_MARGIN = 0.03
+CARD_TEXT_MIN_HEIGHT = 0.015  # on a title / end card, even small print (credits, licence) counts
 FACE_MARGIN_OF_CROP = 0.12  # the face always keeps this much room to the crop edge
 ZOOM_PERCENTILE = 80  # zoom for the width the person needs most of the time, not for one wild gesture
 TEXT_ZOOM_PERCENTILE = 100  # a title card must be shown whole
@@ -176,8 +177,9 @@ def _person_span(face: Face, sample_persons) -> tuple[float, float] | None:
     return max(0.0, body.x - PERSON_MARGIN), min(1.0, body.x + body.w + PERSON_MARGIN)
 
 
-def _text_span(text) -> tuple[float, float] | None:
-    lines = overlay_lines(text or [])
+def _text_span(text, everything: bool = False) -> tuple[float, float] | None:
+    """Horizontal extent of the overlay lines, or of all text (small print too) on a card."""
+    lines = [b for b in text or [] if b.h >= CARD_TEXT_MIN_HEIGHT] if everything else overlay_lines(text or [])
     if not lines:
         return None
     return max(0.0, min(b.x for b in lines) - TEXT_MARGIN), min(1.0, max(b.x + b.w for b in lines) + TEXT_MARGIN)
@@ -265,7 +267,11 @@ def _shot_plan(samples: list[Sample], base: float, sample_fps: float) -> tuple[n
             raw[i] = float(np.clip(x, face.cx - room, face.cx + room))
     else:
         # No face: title cards and end screens are about their text.
-        spans = [_text_span(_nearest(samples, i, "text")) for i in range(len(samples))]
+        texts = [_nearest(samples, i, "text") for i in range(len(samples))]
+        overlay = [_text_span(t) for t in texts]
+        # It's a card when overlay text is on screen for a good part of the shot; then its small
+        # print counts too (credits, a licence line). Signs in B-roll alone never trigger this.
+        spans = [_text_span(t, everything=True) if o else None for t, o in zip(texts, overlay)]
         text_spans = [s for s in spans if s]
         if text_spans and len(text_spans) >= 0.3 * len(samples):
             widths = [b - a for a, b in text_spans]

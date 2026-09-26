@@ -162,6 +162,12 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
      85% or more of its natural size (balanced line widths), then placed back where the text was, with its caption
      box. Because the real pixels are reused (no OCR, no re-typing), font, colour and animation are preserved.
 - The fingerprint check makes sure text is only moved while it is actually on screen (not while fading or sliding in).
+- **Only the letters move:** text without a caption box is lifted by its own colour (measured when planning), inside
+  the detected text area only, so a shirt, a hand or the stage behind it stays behind. Captions *with* a box keep
+  their box, since the box is part of their style.
+- Texts that share a row in the original (like "July 2017 … Denver Colorado") stay side by side on one row.
+- Big display type (letters taller than 13% of the frame, e.g. an animated title card) is never cut into pieces;
+  the card's own shot is framed to show it whole.
 - The same camera path drives the **browser preview** and the **final render**, so the preview matches the export.
 
 ### Rendering

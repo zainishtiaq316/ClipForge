@@ -10,6 +10,9 @@ const PLATE_PAD = 0.22
 const SAFE_TOP = 0.05
 const SAFE_BOTTOM = 0.95
 const MIN_WRAP_SCALE = 0.85
+const ROW_GAP = 0.6
+const ROW_MIN_FIT = 0.6
+const TITLE_LETTER_HEIGHT = 0.13
 const BAR_TEXT_HEIGHT = 0.055
 const WINDOW_SUBJECT_MARGIN = 0.15
 const WINDOW_RAMP_S = 0.3
@@ -108,55 +111,130 @@ function block(line: TextLineData, W: number, H: number, scale: number, maxW: nu
   return { segments, lineS, segH, gap, blockH: segments.length * segH + (segments.length - 1) * gap }
 }
 
-export function layoutOps(lines: TextLineData[], v: View): LineOps[] {
+interface Entry {
+  line: TextLineData
+  erase: Rect | null
+  b: ReturnType<typeof block>
+  anchor: number
+  scale0: number
+  X: number
+  Y: number
+  W: number
+  H: number
+}
+
+function entry(line: TextLineData, v: View, maxW: number): Entry | null {
   const s = viewScale(v)
-  const maxW = MAX_LINE_WIDTH * v.outW
   const cropX1 = v.cropX0 + v.cropW
   const top = videoTop(v)
   const vh = videoHeight(v)
-  const barTop = top
-  const barBottom = v.outH - top - vh
+  const X = line.x * v.srcW, Y = line.y * v.srcH, W = line.w * v.srcW, H = line.h * v.srcH
+  if (X >= v.cropX0 - 1 && X + W <= cropX1 + 1) return null
+  if (line.h / (line.boxed ? 1 : 1.5) > TITLE_LETTER_HEIGHT) return null // big display type: never cut it up
+  let erase: Rect | null = null
+  const vx0 = Math.max(X, v.cropX0), vx1 = Math.min(X + W, cropX1)
+  if (vx1 > vx0) erase = [Math.trunc((vx0 - v.cropX0) * s), Math.trunc(top + Y * s), Math.ceil((vx1 - vx0) * s), Math.ceil(H * s)]
 
-  const blocks: { line: TextLineData; erase: Rect | null; b: ReturnType<typeof block>; y: number }[] = []
-  for (const line of lines) {
-    const X = line.x * v.srcW, Y = line.y * v.srcH, W = line.w * v.srcW, H = line.h * v.srcH
-    if (X >= v.cropX0 - 1 && X + W <= cropX1 + 1) continue
-    let erase: Rect | null = null
-    const vx0 = Math.max(X, v.cropX0), vx1 = Math.min(X + W, cropX1)
-    if (vx1 > vx0) erase = [Math.trunc((vx0 - v.cropX0) * s), Math.trunc(top + Y * s), Math.ceil((vx1 - vx0) * s), Math.ceil(H * s)]
-
-    let b = block(line, W, H, s, maxW)
-    let anchor = top + (Y + H / 2) * s
-    const relative = (Y + H / 2) / v.srcH
-    const barH = relative >= 0.5 ? barBottom : barTop
-    if (barH > 0) {
-      const bigger = block(line, W, H, Math.max(s, (BAR_TEXT_HEIGHT * v.outH) / H), maxW)
-      for (const candidate of [bigger, b]) {
-        if (candidate.blockH * 1.25 <= barH) {
-          b = candidate
-          anchor = relative >= 0.5 ? top + vh + barH / 2 : barH / 2
-          break
-        }
+  let scale0 = s
+  let b = block(line, W, H, s, maxW)
+  let anchor = top + (Y + H / 2) * s
+  const relative = (Y + H / 2) / v.srcH
+  const barH = relative >= 0.5 ? v.outH - top - vh : top
+  if (barH > 0) {
+    const big = Math.max(s, (BAR_TEXT_HEIGHT * v.outH) / H)
+    for (const scale of [big, s]) {
+      const candidate = block(line, W, H, scale, maxW)
+      if (candidate.blockH * 1.25 <= barH) {
+        b = candidate
+        scale0 = scale
+        anchor = relative >= 0.5 ? top + vh + barH / 2 : barH / 2
+        break
       }
     }
-    blocks.push({ line, erase, b, y: anchor - b.blockH / 2 })
+  }
+  return { line, erase, b, anchor, scale0, X, Y, W, H }
+}
+
+interface Group {
+  row: Entry[] | null
+  entry?: Entry
+  scale: number
+  segH: number
+  blockH: number
+  top: number
+}
+
+/** Lines on the same row stay side by side when they fit (mirrors text_layout._groups). */
+function groups(entries: Entry[], maxW: number): Group[] {
+  const rows: Entry[][] = []
+  for (const e of [...entries].sort((a, c) => a.Y - c.Y || a.X - c.X)) {
+    const row = rows.find((r) => Math.min(e.Y + e.H, r[0].Y + r[0].H) - Math.max(e.Y, r[0].Y) >= 0.5 * Math.min(e.H, r[0].H))
+    if (row) row.push(e)
+    else rows.push([e])
+  }
+  const out: Group[] = []
+  for (const row of rows) {
+    if (row.length > 1) {
+      row.sort((a, c) => a.X - c.X)
+      let scale = Math.min(...row.map((e) => e.scale0))
+      const hMax = Math.max(...row.map((e) => e.H))
+      const total = row.reduce((sum, e) => sum + e.W, 0) * scale + ROW_GAP * hMax * scale * (row.length - 1)
+      const fit = Math.min(1, maxW / total)
+      if (fit >= ROW_MIN_FIT) {
+        scale *= fit
+        const blockH = hMax * scale
+        const anchor = row.reduce((sum, e) => sum + e.anchor, 0) / row.length
+        out.push({ row, scale, segH: blockH, blockH, top: anchor - blockH / 2 })
+        continue
+      }
+    }
+    for (const e of row) out.push({ row: null, entry: e, scale: e.b.lineS, segH: e.b.segH, blockH: e.b.blockH, top: e.anchor - e.b.blockH / 2 })
+  }
+  return out
+}
+
+export function layoutOps(lines: TextLineData[], v: View): LineOps[] {
+  const maxW = MAX_LINE_WIDTH * v.outW
+  const entries = lines.map((l) => entry(l, v, maxW)).filter((e): e is Entry => e !== null)
+  const gs = groups(entries, maxW).sort((a, c) => a.top - c.top)
+  for (let i = 1; i < gs.length; i++) {
+    const prev = gs[i - 1]
+    gs[i].top = Math.max(gs[i].top, prev.top + prev.blockH + prev.segH * 0.6)
+  }
+  if (gs.length) {
+    const last = gs[gs.length - 1]
+    const shift = Math.max(0, last.top + last.blockH - SAFE_BOTTOM * v.outH)
+    const topRoom = gs[0].top - shift - SAFE_TOP * v.outH
+    for (const g of gs) g.top -= shift + Math.min(0, topRoom)
   }
 
-  blocks.sort((a, c) => a.y - c.y)
-  for (let i = 1; i < blocks.length; i++) {
-    const prev = blocks[i - 1]
-    blocks[i].y = Math.max(blocks[i].y, prev.y + prev.b.blockH + prev.b.segH * 0.6)
-  }
-  if (blocks.length) {
-    const last = blocks[blocks.length - 1]
-    const shift = Math.max(0, last.y + last.b.blockH - SAFE_BOTTOM * v.outH)
-    const topRoom = blocks[0].y - shift - SAFE_TOP * v.outH
-    for (const bl of blocks) bl.y -= shift + Math.min(0, topRoom)
-  }
-
-  return blocks.map(({ line, erase, b, y: blockTop }) => {
-    const X = line.x * v.srcW, Y = line.y * v.srcH, W = line.w * v.srcW, H = line.h * v.srcH
-    let y = blockTop
+  const ops: LineOps[] = []
+  for (const g of gs) {
+    if (g.row) {
+      const widths = g.row.map((e) => e.W * g.scale)
+      const gapX = ROW_GAP * g.blockH
+      let x = (v.outW - widths.reduce((a, c) => a + c, 0) - gapX * (widths.length - 1)) / 2
+      g.row.forEach((e, i) => {
+        const w = widths[i]
+        const h = e.H * g.scale
+        const y = g.top + (g.blockH - h) / 2
+        const paste = {
+          src: [Math.trunc(e.X), Math.trunc(e.Y), Math.max(1, Math.trunc(e.W)), Math.max(1, Math.trunc(e.H))] as Rect,
+          dst: [Math.trunc(x), Math.trunc(y), Math.max(1, Math.trunc(w)), Math.max(1, Math.trunc(h))] as Rect,
+        }
+        let plate: Rect | null = null
+        if (e.line.boxed) {
+          const pad = PLATE_PAD * h
+          plate = [Math.trunc(x - pad), Math.trunc(y - pad), Math.trunc(w + 2 * pad), Math.trunc(h + 2 * pad)]
+        }
+        ops.push({ line: e.line, erase: e.erase, plate, pastes: [paste], segments: [[0, 1]] })
+        x += w + gapX
+      })
+      continue
+    }
+    const e = g.entry!
+    const { line, X, Y, W, H, b } = e
+    let y = g.top
     let widest = 0
     const pastes = b.segments.map(([a, c]) => {
       const srcW = (c - a) * W
@@ -172,10 +250,11 @@ export function layoutOps(lines: TextLineData[], v: View): LineOps[] {
     let plate: Rect | null = null
     if (line.boxed) {
       const pad = PLATE_PAD * b.segH
-      plate = [Math.trunc((v.outW - widest) / 2 - pad), Math.trunc(blockTop - pad), Math.trunc(widest + 2 * pad), Math.trunc(b.blockH + 2 * pad)]
+      plate = [Math.trunc((v.outW - widest) / 2 - pad), Math.trunc(g.top - pad), Math.trunc(widest + 2 * pad), Math.trunc(b.blockH + 2 * pad)]
     }
-    return { line, erase, plate, pastes, segments: b.segments }
-  })
+    ops.push({ line, erase: e.erase, plate, pastes, segments: b.segments })
+  }
+  return ops
 }
 
 export interface FrameLayout {
