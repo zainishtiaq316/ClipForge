@@ -9,8 +9,19 @@ from app.services import segmenter
 from app.services.analyzer import Analysis, Sample, detect_scene_cuts
 from app.services.downloader import normalize_youtube_url
 from app.services.face_detector import Face
-from app.services.reframer import CameraPath, build_camera_path, build_fit_ranges, crop_fraction
+from app.services.reframer import CameraPath, build_camera_path, crop_fraction
+from app.services.renderer import crop_width
 from app.services.text_detector import TextBox
+from app.services.text_layout import (
+    TextLayout,
+    TextLine,
+    View,
+    fit_line,
+    fit_text_window,
+    is_text_block,
+    layout_ops,
+    text_runs,
+)
 
 # --- segmentation -------------------------------------------------------------
 
@@ -132,38 +143,107 @@ CAPTION = TextBox(0.05, 0.85, 0.6, 0.06)  # a lower-third wider than the 9:16 wi
 SHIRT_PRINT = TextBox(0.45, 0.7, 0.12, 0.06)  # short, blocky text on clothing
 
 
-def test_wide_caption_switches_to_fit_layout():
+def test_caption_run_is_found():
     analysis = _with_text(_analysis([0.5] * 100), 6.0, 12.0, CAPTION)
-    ranges = build_fit_ranges(analysis, crop_fraction(1920, 1080))
-    assert len(ranges) == 1
-    start, end = ranges[0]
+    runs = text_runs(analysis)
+    assert len(runs) == 1
+    start, end, t_ref = runs[0]
     assert start <= 6.0 and end >= 12.0, "the whole caption must be covered"
-    assert end - start < 8.0
+    assert start < t_ref < end
 
 
 def test_small_text_near_a_face_is_ignored():
     analysis = _with_text(_analysis([0.5] * 100), 0.0, 20.0, SHIRT_PRINT)
-    assert build_fit_ranges(analysis, crop_fraction(1920, 1080)) == []
+    assert text_runs(analysis) == []
 
 
 def test_flashing_text_is_ignored():
-    analysis = _with_text(_analysis([0.5] * 100), 6.0, 6.5, CAPTION)
-    assert build_fit_ranges(analysis, crop_fraction(1920, 1080)) == []
+    analysis = _with_text(_analysis([0.5] * 100), 6.0, 6.8, CAPTION)
+    assert text_runs(analysis) == []
 
 
-def test_fit_range_expands_to_scene_cut_but_never_shrinks():
-    analysis = _with_text(_analysis([0.5] * 100, cuts=[5.6, 12.6]), 6.0, 12.0, CAPTION)
-    (start, end), = build_fit_ranges(analysis, crop_fraction(1920, 1080))
-    assert start == pytest.approx(5.6) and end == pytest.approx(12.6)
+def _line(x=0.05, y=0.85, w=0.6, h=0.06, cuts=(0.2, 0.4, 0.6, 0.8), boxed=True):
+    return TextLine(x=x, y=y, w=w, h=h, cuts=cuts, boxed=boxed, bg=(0, 0, 0), ink=0.3)
 
 
-def test_camera_path_carries_fit_ranges_and_round_trips():
-    analysis = _with_text(_analysis([0.5] * 100), 6.0, 12.0, CAPTION)
-    path = build_camera_path(analysis, 1920, 1080)
-    assert path.fit_ranges
+def test_long_line_wraps_into_balanced_lines():
+    line = _line(cuts=(0.1, 0.45, 0.55, 0.9))
+    segments, scale = fit_line(line, 1152, 1.78, 972)
+    assert len(segments) == 2, "two lines are enough, so no third line"
+    assert max(b - a for a, b in segments) == pytest.approx(0.55), "wrap at the most even word gap"
+    assert scale >= 0.85 * 1.78, "text keeps (almost) its natural size"
+
+    much_longer = _line(w=0.95, cuts=(0.1, 0.3, 0.45, 0.55, 0.7, 0.9))
+    segments, _ = fit_line(much_longer, 1824, 1.78, 972)
+    assert len(segments) == 3
+
+
+def test_short_line_stays_on_one_line():
+    segments, scale = fit_line(_line(w=0.2), 384, 1.78, 972)
+    assert segments == [(0.0, 1.0)] and scale == pytest.approx(1.78)
+
+
+def test_line_without_word_gaps_is_scaled_to_fit():
+    segments, scale = fit_line(_line(cuts=()), 1152, 1.78, 972)
+    assert segments == [(0.0, 1.0)]
+    assert 1152 * scale == pytest.approx(972)
+
+
+def test_reflowed_text_fits_the_frame_and_covers_the_cut_original():
+    view = View(1920, 1080, crop_x0=656, crop_w=608, out_w=1080, out_h=1920)
+    (op,) = layout_ops((_line(),), view)
+    assert op.erase is not None and op.plate is not None
+    for paste in op.pastes:
+        x, y, w, h = paste.dst
+        assert 0 <= x and x + w <= 1080 and 0 <= y and y + h <= 1920
+    assert len(op.pastes) >= 2, "a caption 2x wider than the crop is wrapped"
+
+
+def test_text_fully_inside_the_crop_is_left_alone():
+    view = View(1920, 1080, crop_x0=0, crop_w=608, out_w=1080, out_h=1920)
+    assert layout_ops((_line(x=0.05, w=0.2),), view) == []
+
+
+def test_zoomed_out_text_moves_onto_the_bar():
+    crop_w = crop_width(1920, 1080, 0.6)
+    view = View(1920, 1080, crop_x0=0, crop_w=crop_w, out_w=1080, out_h=1920)
+    assert view.video_top > 0, "zooming out leaves room above and below"
+    (op,) = layout_ops((_line(x=0.5, w=0.45),), view)
+    assert min(p.dst[1] for p in op.pastes) >= view.video_top + view.video_h, "caption sits on the bottom bar"
+
+
+def test_window_shifts_to_include_text_that_fits():
+    layout = TextLayout(0.0, 10.0, (_line(x=0.30, w=0.25),))
+    x0, fits = fit_text_window(800, 608, 1920, 1000.0, layout, t=5.0)
+    assert fits and x0 <= 0.30 * 1920 and x0 + 608 >= 0.55 * 1920
+
+
+def test_window_does_not_abandon_the_subject_for_a_caption():
+    layout = TextLayout(0.0, 10.0, (_line(x=0.0, w=0.25),))
+    x0, fits = fit_text_window(1300, 608, 1920, 1604.0, layout, t=5.0)
+    assert not fits and x0 == 1300
+
+
+def test_slides_become_the_subject():
+    lines = (_line(x=0.3, y=0.2, w=0.3, h=0.08), _line(x=0.3, y=0.3, w=0.3, h=0.08))
+    assert is_text_block(lines)
+    layout = TextLayout(0.0, 10.0, lines, block=True)
+    x0, fits = fit_text_window(0, 608, 1920, 304.0, layout, t=5.0)
+    assert fits and x0 <= 0.3 * 1920
+
+
+def test_camera_path_carries_text_layouts_and_round_trips():
+    layout = TextLayout(6.0, 12.0, (_line(),))
+    path = build_camera_path(_analysis([0.5] * 100), 1920, 1080, (layout,))
     again = CameraPath.from_dict(path.to_dict())
-    assert again.fit_ranges == path.fit_ranges
-    assert again.fit_mask(np.array([9.0, 15.0])).tolist() == [True, False]
+    assert again.text_layouts == path.text_layouts
+    assert again.text_at(9.0) == layout and again.text_at(15.0) is None
+
+
+def test_zoom_widens_the_window():
+    assert crop_width(1920, 1080, 0.0) == 608
+    assert crop_width(1920, 1080, 1.0) == 1920
+    assert 608 < crop_width(1920, 1080, 0.5) < 1920
 
 
 def test_consistent_motion_is_followed_without_faces():
@@ -234,3 +314,10 @@ def test_text_detector_finds_a_caption_line():
     assert boxes, "caption not detected"
     widest = max(boxes, key=lambda b: b.w)
     assert widest.w > 0.5 and widest.y > 0.75, widest
+
+
+def test_legacy_fit_framing_becomes_zoom():
+    clip = Clip.model_validate({"start": 0, "end": 5, "framing": "fit"})
+    assert clip.framing == "auto" and clip.zoom == 1.0
+    with pytest.raises(ValidationError):
+        Clip(start=0, end=5, zoom=1.5)

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type Ref, type RefObject } from 'react'
 import { Pause, Play, ScanFace, Volume2, VolumeX } from 'lucide-react'
-import type { CameraPathData, Framing, MediaInfo } from '../../lib/api'
-import { cropCenterAt, cropLeft, isFitAt } from '../../lib/cameraPath'
+import type { CameraPathData, Clip, MediaInfo } from '../../lib/api'
+import { frameLayout } from '../../lib/textLayout'
 import { formatTime } from '../../lib/time'
 
 interface Props {
@@ -9,14 +9,14 @@ interface Props {
   src: string
   media: MediaInfo
   cameraPath: CameraPathData | null
-  framing: Framing
+  clip: Clip | null
 }
 
 /**
  * The original 16:9 video with the 9:16 crop window drawn on top, so the user
  * can see exactly which part of the frame each vertical clip will keep.
  */
-export function SourcePlayer({ ref, src, media, cameraPath, framing }: Props) {
+export function SourcePlayer({ ref, src, media, cameraPath, clip }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
   const timeRef = useRef<HTMLSpanElement>(null)
@@ -39,10 +39,10 @@ export function SourcePlayer({ ref, src, media, cameraPath, framing }: Props) {
       if (video) {
         const t = video.currentTime
         if (overlayRef.current && cameraPath) {
-          const frac = isFitAt(cameraPath, t, framing) ? 1 : cameraPath.crop_fraction
-          const left = cropLeft(cropCenterAt(cameraPath, t, framing), frac)
-          overlayRef.current.style.left = `${left * 100}%`
-          overlayRef.current.style.width = `${frac * 100}%`
+          // Same window the renderer uses: camera path + zoom + shift to include text.
+          const { x0, cropW } = frameLayout(cameraPath, clip, t, media.width, media.height)
+          overlayRef.current.style.left = `${(x0 / media.width) * 100}%`
+          overlayRef.current.style.width = `${(cropW / media.width) * 100}%`
         }
         if (timeRef.current) timeRef.current.textContent = formatTime(t)
       }
@@ -50,7 +50,7 @@ export function SourcePlayer({ ref, src, media, cameraPath, framing }: Props) {
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [cameraPath, framing])
+  }, [cameraPath, clip, media.width, media.height])
 
   const toggle = () => {
     const video = videoRef.current

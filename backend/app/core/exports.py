@@ -27,7 +27,7 @@ from .storage import store
 
 log = logging.getLogger(__name__)
 
-RENDER_VERSION = "v2"  # bump to invalidate cached renders after changing the renderer
+RENDER_VERSION = "v4"  # bump to invalidate cached renders after changing the renderer
 JOB_TTL_S = 6 * 3600
 
 # x264 already uses every core, so clips are rendered one at a time.
@@ -51,7 +51,7 @@ def clip_file_name(project: Project, clip: Clip) -> str:
 
 def render_key(clip: Clip) -> str:
     raw = (
-        f"{RENDER_VERSION}|{clip.start:.3f}|{clip.end:.3f}|{clip.framing}|"
+        f"{RENDER_VERSION}|{clip.start:.3f}|{clip.end:.3f}|{clip.framing}|{clip.zoom:.3f}|"
         f"{settings.output_width}x{settings.output_height}|{settings.x264_preset}|{settings.x264_crf}"
     )
     return hashlib.sha1(raw.encode()).hexdigest()[:20]
@@ -118,7 +118,7 @@ class ExportManager:
                 if not target.exists():
                     render_vertical_clip(
                         source, info, path, clip.start, min(clip.end, info.duration), target,
-                        framing=clip.framing,
+                        framing=clip.framing, zoom=clip.zoom,
                         out_w=settings.output_width, out_h=settings.output_height,
                         preset=settings.x264_preset, crf=settings.x264_crf,
                         progress=lambda p, i=i: self._set(job_id, progress=round((i + p) / total, 3)),

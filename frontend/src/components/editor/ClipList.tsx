@@ -96,8 +96,10 @@ export function ClipList(props: Props) {
                   <span className="tabular hidden rounded-md bg-surface-3 px-2 py-0.5 text-xs text-muted sm:inline">
                     {formatDuration(clip.end - clip.start)}
                   </span>
-                  {clip.framing !== 'auto' && (
-                    <span className="hidden rounded-md border border-line px-1.5 py-0.5 text-[10px] text-subtle md:inline">{clip.framing}</span>
+                  {(clip.framing !== 'auto' || clip.zoom > 0) && (
+                    <span className="hidden rounded-md border border-line px-1.5 py-0.5 text-[10px] text-subtle md:inline">
+                      {[clip.framing !== 'auto' && clip.framing, clip.zoom > 0 && `zoom ${Math.round(clip.zoom * 100)}%`].filter(Boolean).join(' · ')}
+                    </span>
                   )}
                 </button>
                 <Button size="icon" variant="ghost" aria-label={`Play ${clip.title}`} onClick={() => onPlay(clip)} icon={<Play className="size-4" />} />

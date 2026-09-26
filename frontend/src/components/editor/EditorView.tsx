@@ -157,7 +157,7 @@ export function EditorView({ initial }: { initial: Project }) {
     let start = t
     let end = Math.min(duration, t + length)
     if (end - start < MIN_CLIP) start = Math.max(0, end - length)
-    const clip: Clip = { id: newId(), start: round3(start), end: round3(end), framing: 'auto', title: `Clip ${clips.length + 1}` }
+    const clip: Clip = { id: newId(), start: round3(start), end: round3(end), framing: 'auto', zoom: 0, title: `Clip ${clips.length + 1}` }
     setClips((all) => sortClips([...all, clip]))
     setSelectedId(clip.id)
     toast(`Added a ${formatDuration(end - start)} clip at the playhead`, 'success')
@@ -299,7 +299,7 @@ export function EditorView({ initial }: { initial: Project }) {
           src={api.videoUrl(project.id)}
           media={media}
           cameraPath={cameraPath}
-          framing={selected?.framing ?? 'auto'}
+          clip={selected}
         />
         <VerticalPreview videoRef={videoRef} cameraPath={cameraPath} clips={clips} selected={selected} />
       </div>
@@ -309,7 +309,7 @@ export function EditorView({ initial }: { initial: Project }) {
         duration={duration}
         clips={clips}
         sceneCuts={project.scene_cuts}
-        fitRanges={cameraPath?.fit_ranges ?? []}
+        textRanges={(cameraPath?.text_layouts ?? []).map((l) => [l.start, l.end] as [number, number])}
         selectedId={selectedId}
         videoRef={videoRef}
         onSelect={(id) => setSelectedId(id)}

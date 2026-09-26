@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react'
 import { Crosshair, Smartphone } from 'lucide-react'
 import type { CameraPathData, Clip } from '../../lib/api'
-import { cropCenterAt, cropLeft, isFitAt } from '../../lib/cameraPath'
+import { bgrToCss, frameLayout, layoutOps, videoHeight, videoTop, type View } from '../../lib/textLayout'
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -10,25 +10,14 @@ interface Props {
   selected: Clip | null
 }
 
-const FRAMING_LABEL = { auto: 'Smart framing', track: 'Subject tracking', center: 'Centered', fit: 'Fit + blur' }
+const FRAMING_LABEL = { auto: 'Smart framing', track: 'Subject tracking', center: 'Centered' }
 
 const CANVAS_W = 540
 const CANVAS_H = 960
 
-/** Mirrors the renderer's "fit" filter: blurred cover background + letterboxed frame. */
-function drawFit(ctx: CanvasRenderingContext2D, video: HTMLVideoElement, vw: number, vh: number) {
-  const cover = Math.max(CANVAS_W / vw, CANVAS_H / vh)
-  ctx.save()
-  ctx.filter = 'blur(18px) brightness(0.8)'
-  ctx.drawImage(video, (CANVAS_W - vw * cover) / 2, (CANVAS_H - vh * cover) / 2, vw * cover, vh * cover)
-  ctx.restore()
-  const fit = CANVAS_W / vw
-  ctx.drawImage(video, 0, (CANVAS_H - vh * fit) / 2, CANVAS_W, vh * fit)
-}
-
 /**
  * Live 9:16 preview drawn from the source <video> onto a canvas, using the same
- * camera path the renderer uses. Instant feedback, no rendering needed.
+ * camera path, zoom and text layout geometry as the renderer. No rendering needed.
  */
 export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -49,23 +38,32 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
       if (video && video.readyState >= 2 && video.videoWidth) {
         const t = video.currentTime
         const active = selected && t >= selected.start && t <= selected.end ? selected : clips.find((c) => t >= c.start && t < c.end)
-        const vw = video.videoWidth
-        const vh = video.videoHeight
-        if (isFitAt(cameraPath, t, active?.framing ?? 'auto')) {
-          drawFit(ctx, video, vw, vh)
-          if (labelRef.current) labelRef.current.textContent = active ? active.title || 'Clip' : 'Outside clips'
-          raf = requestAnimationFrame(draw)
-          return
+        const srcW = video.videoWidth
+        const srcH = video.videoHeight
+        const { x0, cropW, layout } = frameLayout(cameraPath, active, t, srcW, srcH)
+        const view: View = { srcW, srcH, cropX0: x0, cropW, outW: CANVAS_W, outH: CANVAS_H }
+        const top = videoTop(view)
+        const vh = videoHeight(view)
+
+        // Solid bars (only visible when zoomed out) + the video window.
+        ctx.fillStyle = '#000'
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+        ctx.drawImage(video, x0, 0, cropW, srcH, 0, top, CANVAS_W, vh)
+
+        // On-screen text the crop would cut: erase the cut original, draw it re-flowed.
+        if (layout) {
+          for (const op of layoutOps(layout.lines, view)) {
+            ctx.fillStyle = bgrToCss(op.line.bg)
+            if (op.erase) {
+              const pad = 0.15 * op.erase[3]
+              ctx.fillRect(op.erase[0], op.erase[1] - pad, op.erase[2], op.erase[3] + 2 * pad)
+            }
+            if (op.plate) ctx.fillRect(...op.plate)
+            for (const { src, dst } of op.pastes) ctx.drawImage(video, ...src, ...dst)
+          }
         }
-        const frac = cameraPath?.crop_fraction ?? Math.min(1, (vh * 9) / 16 / vw)
-        const sw = frac * vw
-        const sh = frac >= 1 ? Math.min(vh, (vw * 16) / 9) : vh
-        const sx = cropLeft(cropCenterAt(cameraPath, t, active?.framing ?? 'auto'), frac) * vw
-        const sy = (vh - sh) / 2
-        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, CANVAS_W, CANVAS_H)
-        if (labelRef.current) {
-          labelRef.current.textContent = active ? active.title || 'Clip' : 'Outside clips'
-        }
+
+        if (labelRef.current) labelRef.current.textContent = active ? active.title || 'Clip' : 'Outside clips'
       }
       raf = requestAnimationFrame(draw)
     }
@@ -82,6 +80,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         <span className="flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
           <Crosshair className="size-3" />
           {FRAMING_LABEL[selected?.framing ?? 'auto']}
+          {selected && selected.zoom > 0 ? ` · zoom out ${Math.round(selected.zoom * 100)}%` : ''}
         </span>
       </div>
       <div className="mx-auto w-full max-w-[220px] sm:max-w-[260px] lg:max-w-[calc(56vh*0.5625)]">
@@ -89,7 +88,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
           <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} className="size-full" />
           <span
             ref={labelRef}
-            className="absolute bottom-3 left-1/2 max-w-[85%] -translate-x-1/2 truncate rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur"
+            className="absolute top-3 left-1/2 max-w-[85%] -translate-x-1/2 truncate rounded-full bg-black/60 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur"
           />
         </div>
       </div>

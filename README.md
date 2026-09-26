@@ -2,7 +2,8 @@
 
 ClipForge turns a long horizontal (16:9) video into short vertical (9:16) clips for TikTok, Reels and Shorts.
 It splits the video at natural pauses, **tracks the speaker** so they stay in frame (no fixed center crop),
-**keeps on-screen text readable** (captions, titles and slides are shown whole instead of being cut in half),
+**keeps on-screen text readable** (captions and titles are re-wrapped into the vertical frame in their original style
+instead of being cut in half), lets you **zoom out** to show more of the scene,
 lets you fine-tune every clip in a visual editor, and exports 1080×1920 MP4 files one by one or all at once as a ZIP.
 
 It runs **100% locally** and uses only free, open-source tools: no API keys, no accounts, no paid services.
@@ -15,7 +16,7 @@ It runs **100% locally** and uses only free, open-source tools: no API keys, no 
 |---|---|---|
 | 1 | Accept a YouTube URL or an uploaded video file (16:9) | Drag & drop / browse upload (MP4, MOV, MKV, WEBM, AVI) **or** paste a YouTube link (downloaded with `yt-dlp`, up to 1080p). |
 | 2 | Automatically segment the full video, with manual adjustment of start/end | The whole video is covered with clips cut at **pauses in speech** and **scene changes**, near a target length you choose (15-90 s). Adjust with draggable timeline handles (snap to scene cuts), typed times, ±1 s buttons, "set to playhead", split, add, delete or re-split. |
-| 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, slides, end screens) is detected with **PP-OCRv3**; when it's too wide for a 9:16 crop, those seconds switch to a *fit* layout (whole frame over a blurred background) so the text is never cut. A live preview shows the result before exporting. Per-clip framing: *Smart* (default), *Track*, *Center* or *Fit*. |
+| 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, lower thirds, end screens) is detected with **PP-OCRv3**. If it fits in the 9:16 window, the window shifts to include it; if it's wider, the original text pixels are re-wrapped into 2-3 lines in the **same font, colour and caption box** and placed back into the frame. Never blurred. A per-clip **zoom-out** slider shows more of the scene (e.g. an object in the speaker's hand) with solid bars. A live preview shows the result before exporting. |
 | 4 | Export clips one by one, or all at once | "Export" on any clip downloads an MP4. "Export all" (or select several) downloads a ZIP. |
 | 5 | Adjust clip length (extend or shorten) before exporting | "Extend 5s" / "Shorten 5s", length presets (15/30/45/60 s), drag handles, or type exact times. |
 | ● | Free & open-source only | FFmpeg, OpenCV, YuNet, yt-dlp, FastAPI, React. See [Tech stack](#tech-stack). |
@@ -79,10 +80,12 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 
    | Framing | What it does |
    |---|---|
-   | **Smart** (default) | Follows the speaker, and switches to the fit layout while wide on-screen text is visible |
-   | **Track** | Always a 9:16 crop following the speaker or main moving element, even over text |
+   | **Smart** (default) | Follows the speaker and keeps on-screen text whole (moves the frame to include it, or re-wraps it) |
+   | **Track** | Follows the speaker or main moving element only; text may be cut |
    | **Center** | Fixed crop from the middle of the frame |
-   | **Fit** | Whole frame over a blurred background for the entire clip (slides, wide group shots) |
+
+   **Zoom out** (0-100%) widens the view for any framing: 0% is a full-frame vertical video, higher values show more
+   of the scene with solid black bars above and below (re-wrapped text moves onto the bottom bar).
 5. **Export.** Click the download icon on a clip for a single MP4, or **Export all** for a ZIP.
 
 **Keyboard shortcuts:** `Space` play/pause · `←/→` seek 1 s (`Shift` = 5 s) · `I` / `O` set start/end to the playhead ·
@@ -135,17 +138,32 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 - **Virtual camera:** a **dead zone** ignores small movements, then proportional follow with **velocity and
   acceleration limits**. At a **scene cut the camera re-anchors instantly** instead of panning across the edit.
 - **No face?** It follows the main moving element if it moves in most of the shot; otherwise it stays centered.
-- **On-screen text:** only *lines* of text count (wide and thin, so T-shirt prints and logos are ignored). When a line is
-  wider than the 9:16 window, or a shot shows text but no face, those seconds use the **fit layout**. Text shorter than
-  1 s is ignored, short gaps are bridged, switches snap outward to scene cuts, and mid-shot switches get a 0.25 s
-  crossfade. On the test video this found all 6 overlays (5 numbered tips and the end screen) with no false positives.
+- **Body-aware framing:** hand and object motion pulls the crop sideways (up to the point where the face would lose
+  its margin), so gestures and held objects stay in frame as much as a full-frame 9:16 allows.
+
+### On-screen text (never cut, never blurred)
+- **Which text:** only overlay *lines* count (wide and thin, at least 2.5% of the frame tall, on screen for at least
+  1.5 s), so T-shirt prints, logos and background signs are ignored. On the test video all 6 overlays were found with
+  no false positives.
+- **Plan (analysis time):** each overlay is measured once on a full-resolution frame: its rectangle, whether it sits on a
+  solid caption box (and the box colour), the positions of word gaps, and a tiny fingerprint of how it looks.
+- **Render time, in order of preference:**
+  1. The text already fits in the 9:16 window → nothing to do.
+  2. It fits if the window moves a little → the window eases over (the subject stays well inside). For slides and end
+     cards (several stacked lines) the text itself becomes the subject.
+  3. Otherwise → **re-flow**: the half-cut original is erased (filled with the box colour, or inpainted when the text
+     sits on video), and the original text pixels are wrapped at word gaps into the fewest lines that keep it at
+     85% or more of its natural size (balanced line widths), then placed back where the text was, with its caption
+     box. Because the real pixels are reused (no OCR, no re-typing), font, colour and animation are preserved.
+- The fingerprint check makes sure text is only moved while it is actually on screen (not while fading or sliding in).
 - The same camera path drives the **browser preview** and the **final render**, so the preview matches the export.
 
 ### Rendering
 FFmpeg decodes the clip → Python crops each frame (a zero-copy NumPy slice following the camera path) → FFmpeg scales
-to 1080×1920 and encodes H.264 + AAC with `+faststart`. Clips that include fit sections are composed at 1080×1920 in
-Python with OpenCV (blur on a 1/8-size copy for speed). Audio is trimmed from the source with the same timestamps.
-Renders are cached by a hash of (start, end, framing, encoder settings), so "Export all" reuses clips already exported.
+to 1080×1920 and encodes H.264 + AAC with `+faststart`. Re-flowed text is drawn at crop resolution (so those clips are
+as fast as plain crops, ~3× real time); zoomed-out clips are composed at 1080×1920 with OpenCV (~1.2× real time). Audio is trimmed from the source with the same timestamps. Renders are cached by a hash of
+(start, end, framing, zoom, encoder settings), so "Export all" reuses clips already exported. The browser preview runs a
+TypeScript port of the same geometry (`frontend/src/lib/textLayout.ts`), so what you see is what you export.
 
 ---
 
@@ -190,10 +208,11 @@ cd backend
 .venv/Scripts/python -m pytest -q      # macOS/Linux: .venv/bin/python -m pytest -q
 ```
 
-39 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
-text-aware layout rules (wide captions, ignored T-shirt text, flashes, cut snapping), the real text detector,
+49 tests cover segmentation, scene detection, camera smoothing (jitter, cuts, panning, bounds, no-face fallback),
+on-screen text (overlay detection, ignored T-shirt text and flashes, balanced wrapping, scaling, window shifting,
+slides as subject, zoom-out bar placement), zoom geometry, the real text detector,
 URL validation (including SSRF attempts), clip validation, and a full **end-to-end API run**: a synthetic video is
-uploaded, analysed, edited, re-split and exported (single MP4, *Fit* framing and ZIP), and the output is checked to be
+uploaded, analysed, edited, re-split and exported (single MP4, zoomed-out clip and ZIP), and the output is checked to be
 9:16 with audio and the right duration. No network access is needed.
 
 Manually verified end to end in the browser with a 4.8-minute talking-head video (uploaded) and a TEDx talk
@@ -223,6 +242,7 @@ backend/
       analyzer.py          one-pass faces / scenes / motion + pause detection
       face_detector.py     YuNet with Haar fallback
       text_detector.py     PP-OCRv3 on-screen text detection
+      text_layout.py       plans and re-flows on-screen text into the vertical frame
       segmenter.py         automatic clip boundaries
       reframer.py          subject selection + virtual camera path
       renderer.py          9:16 render pipeline
@@ -230,7 +250,7 @@ backend/
   tests/                 unit + end-to-end API tests
 frontend/
   src/
-    lib/                 API client, time helpers, camera-path interpolation
+    lib/                 API client, time helpers, camera path + text layout geometry (mirrors the renderer)
     hooks/               routing, export polling
     components/home/     upload / YouTube import, recent projects
     components/editor/   player + crop overlay, live 9:16 preview, timeline, clip list, inspector, export tray
@@ -264,10 +284,14 @@ The full reasoning is in **[docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md
   restart (they are marked as failed with a clear message).
 - **Python frame piping for the render:** FFmpeg's `crop` filter can't follow an arbitrary per-frame path without
   enormous expressions. Piping costs a little speed (~3× real-time on a laptop for 1080p) but is exact and simple.
-- **Readable text over a bigger face:** while wide text is on screen, the fit layout makes the speaker smaller for
-  those seconds. Cut text looks broken; a brief layout change looks deliberate. *Track* framing opts out per clip.
+- **A full-frame 9:16 from 16:9 can only be about 32% of the width.** Showing more (a person plus the camera in
+  their hand) needs extra height the video doesn't have, so zooming out adds bars. I chose solid bars controlled by the
+  user over blurred fills or automatic zooming, so every frame is either full-frame or a deliberate choice.
+- **Re-flowed text instead of a smaller frame:** captions keep their own style and the face stays big. The trade-off
+  is that the original text is erased (inpainted when it sits on video, which can leave a soft patch on busy
+  backgrounds), and very long lines without word gaps are scaled down instead of wrapped.
 - **Speaker choice by face size and continuity**, not by who is talking. Active-speaker detection (lip movement +
-  audio) would improve two-person podcasts; users can switch a clip to *Center* or *Fit + blur* meanwhile.
+  audio) would improve two-person podcasts; users can switch a clip to *Center* or zoom out meanwhile.
 - **Segmentation is structural (pauses and cuts), not semantic.** A free local speech-to-text model (e.g. Whisper)
   could add sentence-aware cuts and captions as a next step.
 - **YouTube** can rate-limit or change its site; keeping `yt-dlp` up to date (`pip install -U yt-dlp`) fixes most issues.

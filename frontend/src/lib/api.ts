@@ -2,7 +2,7 @@
 // proxied by Vite in development and served by FastAPI in production.
 
 export type ProjectStatus = 'queued' | 'downloading' | 'analyzing' | 'ready' | 'failed'
-export type Framing = 'auto' | 'track' | 'center' | 'fit'
+export type Framing = 'auto' | 'track' | 'center'
 
 export interface MediaInfo {
   duration: number
@@ -17,6 +17,8 @@ export interface Clip {
   start: number
   end: number
   framing: Framing
+  /** 0 = full-frame 9:16, 1 = whole width with solid bars above and below. */
+  zoom: number
   title: string
 }
 
@@ -37,12 +39,30 @@ export interface Project {
   detector: string
 }
 
+export interface TextLineData {
+  x: number
+  y: number
+  w: number
+  h: number
+  cuts: number[]
+  boxed: boolean
+  bg: number[] // BGR
+  ink: number
+}
+
+/** Overlay text on screen from `start` to `end`, re-flowed into the vertical frame. */
+export interface TextLayoutData {
+  start: number
+  end: number
+  block: boolean
+  lines: TextLineData[]
+}
+
 export interface CameraPathData {
   crop_fraction: number
   times: number[]
   xs: number[]
-  /** Time ranges where on-screen text is too wide for a crop, shown with the fit layout. */
-  fit_ranges: [number, number][]
+  text_layouts: TextLayoutData[]
 }
 
 export type ExportStatus = 'queued' | 'rendering' | 'packaging' | 'done' | 'failed'

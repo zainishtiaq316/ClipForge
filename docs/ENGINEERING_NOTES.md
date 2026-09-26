@@ -44,33 +44,59 @@ Following the detected face frame by frame looks jittery and robotic. The refram
 - At a **scene cut** the camera **jumps immediately** instead of panning across the edit.
 - **Subject selection with continuity bonus:** avoids ping-ponging between two people. If everyone fits in the crop,
   the group is framed together.
+- **Body-aware lean:** hands and held objects move while the face stays still, so the target leans towards the motion
+  centroid (45%), capped so the face always keeps a 12% margin inside the crop.
 
 *Trade-off:* the speaker is chosen by face size and continuity, not by who is talking. Active-speaker detection
 (lip motion + audio) would improve two-person podcasts but adds complexity and processing time. The per-clip
 framing override covers those cases for now.
 
-### 2.4 Text-aware layout ("key element" is not only faces)
-The brief asks to keep "the face **or key element**" in frame. On-screen text (captions, numbered tips, slides, title
-cards, end screens) is often the key element, and it's usually **wider than a 9:16 window**, so a face crop cuts it
-in half.
+### 2.4 On-screen text: re-flow it, never cut it, never blur it
+The brief asks to keep "the face **or key element**" in frame. On-screen text (captions, numbered tips, lower thirds,
+end cards) is often the key element, and it's usually **wider than a 9:16 window**, so a face crop cuts it in half.
 
-**Decision:** detect text with the PP-OCRv3 detector (OpenCV Zoo, Apache-2.0, 2.4 MB). When a line of text is wider
-than the crop window, or a shot has text but no face, those seconds switch to a **fit layout**: the whole frame over a
-blurred copy of itself.
+My first version switched those moments to a "fit" layout (whole frame over a blurred background). It kept the
+text readable, but the speaker became small and the blur looked like a fallback. The final version keeps the frame
+full and moves the *text* instead.
 
-Rules that keep this from misfiring:
-- Only **lines** of text count (wide and thin), so T-shirt prints, logos and background signs are ignored.
-- Text shorter than **1 s** is ignored; gaps under **1.5 s** are bridged so the layout doesn't flicker.
-- Switches are **snapped outward to scene cuts** (a switch on an edit looks intentional). Snapping never shrinks a range,
-  because that would cut text that is already on screen.
-- Switches mid-shot use a **0.25 s crossfade**; switches on a cut are hard cuts.
+**Plan (once per overlay, at analysis time).** PP-OCRv3 (OpenCV Zoo, Apache-2.0, 2.4 MB) finds text lines every 0.4 s.
+Consecutive detections of the same lines form a run; each run is measured once on a full-resolution frame:
+- the line rectangle, and whether it sits on a **solid caption box** (uniform pixels around and between the letters;
+  the box's real edges are found by growing outwards while the colour matches);
+- **word gaps** (ink-free column runs), so a line can be wrapped between words;
+- a 48×8 grayscale **fingerprint**, used at render time to confirm the text is really on screen.
 
-*Trade-off:* in fit layout the speaker is smaller for those seconds. I chose readable text over a bigger face because
-cut text looks broken, while a brief layout change looks deliberate. Users who disagree can pick **Track** framing
-(always crop) per clip.
+**Render (per frame), in order of preference:**
+1. Text already inside the crop window → untouched.
+2. Text fits if the window moves → the window eases over in 0.3 s, as long as the subject keeps a 15% margin. For
+   slides and end cards (two or more stacked lines) the text itself is the subject, so the margin rule is dropped.
+3. Otherwise **re-flow**: erase the half-cut original (fill with the box colour, or OpenCV inpainting when the text
+   sits on video), then take the original text pixels, split them at word gaps into the fewest lines that keep the
+   text at ≥ 85% of its natural size (choosing the most balanced split), draw the caption box behind them and place
+   them where the text was. In a zoomed-out clip, the text moves onto the free bar instead and is enlarged there.
 
-*Measured on the test video:* all 6 detected ranges were real overlays (5 numbered tips + end screen), with 0 false
-positives from clothing or background text.
+Because the actual pixels are reused (no OCR, no re-typing), the font, colours, caption box and even animations are
+preserved. The fingerprint check prevents pasting text while it is fading or sliding in, when the reference
+rectangle would contain something else.
+
+*Trade-offs:*
+- Erasing text that sits directly on video uses inpainting, which can leave a soft patch on busy backgrounds. Caption
+  boxes (the common case) are erased perfectly with their own colour.
+- A line with no word gaps (one long word, or tightly kerned script) can't be wrapped, so it is scaled down to fit.
+- Only horizontal lines are handled; vertical or curved text isn't re-flowed.
+
+*Measured on the test video:* all 6 overlays were found (5 boxed numbered tips + the end card), 0 false positives
+from clothing or background text; long captions wrapped into two balanced lines; the end card became the subject.
+
+### 2.4b Zoom out: solid bars, user-controlled
+A full-height 9:16 window from a 16:9 frame is only ~32% of the width (608 of 1920 px). Showing a person *and* the
+camera in their hand needs ~825 px of width, which at 9:16 means ~1470 px of height. The video only has 1080, so the
+extra room has to be filled with something.
+
+**Decision:** every clip is full-frame by default. A per-clip **zoom-out slider** widens the window and fills the
+space above and below with **solid black**, never blur. Re-flowed text moves onto the bottom bar and gets bigger
+there. I avoided automatic zoom-out because a clip switching between full-frame and bars on its own looks unstable;
+the user decides when the context is worth the bars.
 
 ### 2.5 Segmentation: structure over semantics
 **Decision:** cut at **pauses in speech** (preferred) and **scene cuts**, as close as possible to the target length.
@@ -85,14 +111,17 @@ because it adds a large model download and multiplies processing time, and the b
 highlight ranking.
 
 ### 2.6 Rendering: FFmpeg → Python → FFmpeg
-FFmpeg's `crop` filter can't follow an arbitrary per-frame path without enormous expressions, and it can't switch
-layouts with crossfades cleanly. So FFmpeg decodes, Python positions each frame, and FFmpeg encodes.
+FFmpeg's `crop` filter can't follow an arbitrary per-frame path without enormous expressions, and it can't re-flow
+text. So FFmpeg decodes, Python composes each frame, and FFmpeg encodes.
 
 - **Fast path** (crop only): Python just slices the array (zero-copy) and FFmpeg upscales. About 3× faster than real time.
-- **Composed path** (clips with fit sections): Python composes 1080×1920 frames with OpenCV. The blur is done on a
-  1/8-size copy for the same look at ~1/64 of the cost.
-- **Same data for preview and export:** the browser preview reads the exact camera path and fit ranges the renderer
-  uses, so there are no surprises after export.
+- **Re-flowed text** is composed at crop resolution (the geometry is scale-invariant) and FFmpeg still upscales,
+  so these clips render as fast as plain crops. Measured on a laptop: 25 s clip with a caption in 7.5 s (3.4× real
+  time); a plain crop 3.1×.
+- **Zoomed-out clips** are composed at 1080×1920 (bars + scaled video + text) with OpenCV: about 1.2× real time.
+- **Same data for preview and export:** the browser preview uses the exact camera path and text layouts, and a
+  TypeScript port of the same geometry (`frontend/src/lib/textLayout.ts`), so there are no surprises after export.
+  The only difference: the preview fills erased text with the box colour instead of inpainting it.
 - Renders are **cached** by a hash of every input that affects the output, so "Export all" after exporting one clip
   doesn't re-encode it.
 
@@ -142,10 +171,12 @@ quotas and rate limiting, virus scanning of uploads, HTTPS termination, audit lo
 ## 4. Testing strategy
 
 - **Unit tests** for the pure logic: segmentation, scene-cut detection, camera smoothing (jitter, cuts, panning,
-  bounds), no-face fallback, text-aware layout rules, and URL and clip validation, including SSRF attempts.
+  bounds), no-face fallback, on-screen text (overlay detection, ignored T-shirt text and flashes, balanced wrapping,
+  scaling, window shifting, slides as subject, zoom-out bars), zoom geometry, legacy data migration, and URL and clip
+  validation, including SSRF attempts.
 - **Model test:** the real text detector must find a caption on a synthetic frame.
 - **End-to-end API test:** a synthetic video with a gap in the audio is uploaded, analysed, edited, re-split and
-  exported (single MP4, *Fit* framing, and ZIP). The outputs are probed: 9:16, audio present, correct duration.
+  exported (single MP4, zoomed-out clip, and ZIP). The outputs are probed: 9:16, audio present, correct duration.
   No network needed.
 - **Manual end-to-end:** real talking-head video (upload) and TEDx talk (YouTube link), in the browser, desktop and
   mobile widths. A fresh clone was started with `start.bat` to verify the non-developer path.

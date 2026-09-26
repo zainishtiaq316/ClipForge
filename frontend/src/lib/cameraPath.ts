@@ -6,7 +6,7 @@ import type { CameraPathData, Framing } from './api'
  * so the live preview matches the exported file.
  */
 export function cropCenterAt(path: CameraPathData | null, t: number, framing: Framing = 'auto'): number {
-  if (!path || framing === 'center' || framing === 'fit' || path.times.length === 0) return 0.5
+  if (!path || framing === 'center' || path.times.length === 0) return 0.5
   const { times, xs } = path
   if (t <= times[0]) return xs[0]
   const last = times.length - 1
@@ -21,13 +21,6 @@ export function cropCenterAt(path: CameraPathData | null, t: number, framing: Fr
   const span = times[hi] - times[lo]
   const k = span > 0 ? (t - times[lo]) / span : 0
   return xs[lo] + (xs[hi] - xs[lo]) * k
-}
-
-/** Whether time `t` uses the fit layout (whole frame over a blurred background). */
-export function isFitAt(path: CameraPathData | null, t: number, framing: Framing = 'auto'): boolean {
-  if (framing === 'fit') return true
-  if (framing !== 'auto' || !path?.fit_ranges) return false
-  return path.fit_ranges.some(([start, end]) => t >= start && t < end)
 }
 
 /** Left edge of the crop window (0..1), clamped inside the frame. */

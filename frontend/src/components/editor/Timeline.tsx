@@ -7,7 +7,7 @@ interface Props {
   duration: number
   clips: Clip[]
   sceneCuts: number[]
-  fitRanges: [number, number][]
+  textRanges: [number, number][]
   selectedId: string | null
   videoRef: RefObject<HTMLVideoElement | null>
   onSelect: (id: string) => void
@@ -24,7 +24,7 @@ const ZOOMS = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32]
 
 type Drag = { kind: 'scrub' } | { kind: 'start' | 'end'; id: string; snaps: number[] }
 
-export function Timeline({ duration, clips, sceneCuts, fitRanges, selectedId, videoRef, onSelect, onChange, onSeek, className = '' }: Props) {
+export function Timeline({ duration, clips, sceneCuts, textRanges, selectedId, videoRef, onSelect, onChange, onSeek, className = '' }: Props) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
@@ -210,13 +210,13 @@ export function Timeline({ duration, clips, sceneCuts, fitRanges, selectedId, vi
             ))}
           </div>
 
-          {/* On-screen text: these moments switch to the fit layout in "Smart" framing */}
-          {fitRanges.map(([start, end]) => (
+          {/* On-screen text that Smart framing keeps whole */}
+          {textRanges.map(([start, end]) => (
             <div
               key={start}
               className="absolute z-10 h-1 rounded-full bg-sky-400/80"
               style={{ left: start * pps, width: Math.max(3, (end - start) * pps), top: RULER_H + 3 }}
-              title={`On-screen text ${formatTime(start)} – ${formatTime(end)}: shown full-frame so it isn't cut`}
+              title={`On-screen text ${formatTime(start)} – ${formatTime(end)}: kept whole in the vertical frame`}
             />
           ))}
 

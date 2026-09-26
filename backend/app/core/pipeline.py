@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..config import settings
 from ..schemas import Clip, MediaInfoOut, Project
-from ..services import analyzer, ffmpeg, reframer, segmenter
+from ..services import analyzer, ffmpeg, reframer, segmenter, text_layout
 from ..services.downloader import DownloadError, download_youtube
 from ..services.face_detector import FaceDetector
 from ..services.text_detector import TextDetector
@@ -103,14 +103,16 @@ def process_project(project_id: str) -> None:
             store.update(project_id, preview_file="preview.mp4")
 
         _stage(project_id, "analyzing", "Finding scenes, pauses, faces and on-screen text")
+        text_detector = TextDetector(settings.models_dir)
         result = analyzer.analyze(
-            source, info, FaceDetector(settings.models_dir), TextDetector(settings.models_dir),
+            source, info, FaceDetector(settings.models_dir), text_detector,
             sample_fps=settings.analysis_fps, width=settings.analysis_width, progress=_Throttle(project_id),
         )
         store.write_json(project_id, "analysis.json", result.to_dict())
 
         _stage(project_id, "analyzing", "Planning the vertical framing")
-        path = reframer.build_camera_path(result, info.width, info.height)
+        layouts = tuple(text_layout.plan_text_layouts(source, info, result, text_detector))
+        path = reframer.build_camera_path(result, info.width, info.height, layouts)
         store.write_json(project_id, "camera_path.json", path.to_dict())
 
         clips = build_clips(project_id, info.duration, project.target_length)

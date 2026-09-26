@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 ProjectStatus = Literal["queued", "downloading", "analyzing", "ready", "failed"]
 ExportStatus = Literal["queued", "rendering", "packaging", "done", "failed"]
-Framing = Literal["auto", "track", "center", "fit"]
+Framing = Literal["auto", "track", "center"]
 
 MAX_CLIPS = 300
 MIN_CLIP_LENGTH = 1.0
@@ -33,12 +33,22 @@ class Clip(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     framing: Framing = "auto"
+    zoom: float = Field(default=0.0, ge=0.0, le=1.0)  # 0 = full-frame 9:16, 1 = whole width with bars
     title: str = Field(default="", max_length=80)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_fit(cls, data):
+        # Projects saved before v1.1 used a blurred "fit" framing; it became zoom = 1.
+        if isinstance(data, dict) and data.get("framing") == "fit":
+            data = {**data, "framing": "auto", "zoom": 1.0}
+        return data
 
     @model_validator(mode="after")
     def _ordered(self) -> Clip:
         self.start = round(self.start, 3)
         self.end = round(self.end, 3)
+        self.zoom = round(self.zoom, 3)
         if self.end - self.start < MIN_CLIP_LENGTH:
             raise ValueError(f"A clip must be at least {MIN_CLIP_LENGTH:g} second long")
         return self

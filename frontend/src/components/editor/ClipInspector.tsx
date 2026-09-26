@@ -162,13 +162,12 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
 
       <div className="mt-5">
         <span className="mb-1.5 block text-xs font-medium text-muted">Framing</span>
-        <div className="grid grid-cols-4 gap-1 rounded-xl bg-surface-2 p-1">
+        <div className="grid grid-cols-3 gap-1 rounded-xl bg-surface-2 p-1">
           {(
             [
               ['auto', 'Smart', Sparkles],
               ['track', 'Track', Crosshair],
               ['center', 'Center', SquareDashed],
-              ['fit', 'Fit', Maximize],
             ] as [Framing, string, typeof Crosshair][]
           ).map(([value, label, Icon]) => (
             <button
@@ -185,12 +184,32 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
         </div>
         <p className="mt-1.5 text-[11px] text-subtle">
           {clip.framing === 'auto'
-            ? 'Follows the speaker, and shows the whole frame whenever on-screen text would be cut.'
+            ? 'Follows the speaker, and keeps on-screen text whole: it moves the frame to include it, or re-wraps it into the frame.'
             : clip.framing === 'track'
-              ? 'Always a 9:16 crop that follows the speaker (or main moving element), even over text.'
-              : clip.framing === 'center'
-              ? 'A fixed crop from the middle of the frame.'
-              : 'Shows the whole frame over a blurred background. Good for slides, titles and wide group shots.'}
+              ? 'Follows the speaker (or main moving element) only. On-screen text may be cut.'
+              : 'A fixed crop from the middle of the frame.'}
+        </p>
+      </div>
+
+      <div className="mt-5">
+        <div className="mb-1.5 flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-xs font-medium text-muted">
+            <Maximize className="size-3.5" /> Zoom out
+          </span>
+          <span className="tabular text-xs text-subtle">{clip.zoom > 0 ? `${Math.round(clip.zoom * 100)}%` : 'Full frame'}</span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={Math.round(clip.zoom * 100)}
+          onChange={(e) => onChange({ zoom: Number(e.target.value) / 100 })}
+          className="w-full accent-accent"
+          aria-label="Zoom out"
+        />
+        <p className="mt-1 text-[11px] text-subtle">
+          Show more of the scene (e.g. an object in the speaker's hand). Adds solid black bars above and below, never blur.
         </p>
       </div>
 

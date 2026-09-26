@@ -130,9 +130,9 @@ def test_export_single_and_all(client, project):
     assert info.has_audio
     assert info.duration == pytest.approx(clips[0]["end"] - clips[0]["start"], abs=0.2)
 
-    # "Fit" framing: whole frame over a blurred background, still 9:16.
-    fit = [dict(c, framing="fit") if i == 1 else c for i, c in enumerate(clips)]
-    assert client.put(f"/api/projects/{pid}/clips", json={"clips": fit}).status_code == 200
+    # Zoomed out: wider view with solid bars, still exactly 9:16.
+    zoomed = [dict(c, zoom=0.6) if i == 1 else c for i, c in enumerate(clips)]
+    assert client.put(f"/api/projects/{pid}/clips", json={"clips": zoomed}).status_code == 200
     job = client.post(f"/api/projects/{pid}/exports", json={"clip_ids": [clips[1]["id"]]}).json()
     job = _wait(client, f"/api/exports/{job['id']}", lambda d: d["status"] in {"done", "failed"})
     assert job["status"] == "done", job
