@@ -15,7 +15,7 @@ It runs **100% locally** and uses only free, open-source tools: no API keys, no 
 | # | Requirement | How ClipForge does it |
 |---|---|---|
 | 1 | Accept a YouTube URL or an uploaded video file (16:9) | Drag & drop / browse upload (MP4, MOV, MKV, WEBM, AVI) **or** paste a YouTube link (downloaded with `yt-dlp`, up to 1080p). |
-| 2 | Automatically segment the full video, with manual adjustment of start/end | The whole video is covered with clips cut at **pauses in speech** and **scene changes**, near a target length you choose (15-90 s). Adjust with draggable timeline handles (snap to scene cuts), typed times, ±1 s buttons, "set to playhead", split, add, delete or re-split. |
+| 2 | Automatically segment the full video, with manual adjustment of start/end | The whole video is covered with clips cut at **pauses in speech** and **scene changes**, near a target length you choose (15-90 s). Adjust with draggable timeline handles (snap to scene cuts), typed times, ±1 s buttons, "set to playhead", split, **merge with the next clip**, add your own clip anywhere, delete or re-split. |
 | 3 | Convert 16:9 → 9:16 keeping the subject (face **or key element**) in frame | Faces are detected with **YuNet** and followed by a smoothed "virtual camera". In medium and wide shots the camera frames the **whole person** (NanoDet body box, arms and hands included) and **zooms out automatically** with solid bars when they don't fit a full-frame 9:16. Shots with no face follow the main moving element. **On-screen text** (captions, numbered tips, lower thirds, end screens) is detected with **PP-OCRv3**. If it fits in the 9:16 window, the window shifts to include it; if it's wider, the original text pixels are re-wrapped into 2-3 lines in the **same font, colour and caption box** and placed back into the frame. Never blurred. A per-clip **zoom-out** slider shows more of the scene (e.g. an object in the speaker's hand) with solid bars. A live preview shows the result before exporting. |
 | 4 | Export clips one by one, or all at once | "Export" on any clip downloads an MP4. "Export all" (or select several) downloads a ZIP. |
 | 5 | Adjust clip length (extend or shorten) before exporting | "Extend 5s" / "Shorten 5s", length presets (15/30/45/60 s), drag handles, or type exact times. |
@@ -91,7 +91,10 @@ npm run dev                        # http://localhost:5173 (proxies /api to :800
 5. **Export.** Click the download icon on a clip for a single MP4, or **Export all** for a ZIP.
 
 **Keyboard shortcuts:** `Space` play/pause · `←/→` seek 1 s (`Shift` = 5 s) · `I` / `O` set start/end to the playhead ·
-`S` split at the playhead · `Alt` while dragging disables snapping.
+`S` split at the playhead · `M` merge the selected clip with the next one · `Alt` while dragging disables snapping.
+
+**Your own clips:** *Add clip* creates a clip at the playhead that you can set to any start and end. *Merge with next
+clip* joins two clips into one continuous clip (e.g. the end of one and the start of the next).
 
 ---
 

@@ -1,5 +1,5 @@
 import { useState, type RefObject } from 'react'
-import { Crosshair, Download, Maximize, Minus, Sparkles, MousePointerClick, Play, Plus, Scissors, SquareDashed, Trash2, Timer } from 'lucide-react'
+import { Crosshair, Download, Maximize, Merge, Minus, Sparkles, MousePointerClick, Play, Plus, Scissors, SquareDashed, Trash2, Timer } from 'lucide-react'
 import type { Clip, Framing } from '../../lib/api'
 import { formatDuration, formatTime, parseTime } from '../../lib/time'
 import { Button } from '../ui/Button'
@@ -14,6 +14,8 @@ interface Props {
   onChange: (patch: Partial<Clip>) => void
   onPlay: () => void
   onSplit: () => void
+  onMergeNext: () => void
+  canMergeNext: boolean
   onDelete: () => void
   onExport: () => void
 }
@@ -78,7 +80,7 @@ function EdgeControl({
   )
 }
 
-export function ClipInspector({ clip, index, duration, videoRef, playing, exporting, onChange, onPlay, onSplit, onDelete, onExport }: Props) {
+export function ClipInspector({ clip, index, duration, videoRef, playing, exporting, onChange, onPlay, onSplit, onMergeNext, canMergeNext, onDelete, onExport }: Props) {
   if (!clip) {
     return (
       <div className="card grid place-items-center px-6 py-14 text-center">
@@ -224,6 +226,16 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
           Delete
         </Button>
       </div>
+      <Button
+        size="sm"
+        className="mt-2 w-full"
+        onClick={onMergeNext}
+        disabled={!canMergeNext}
+        icon={<Merge className="size-3.5" />}
+        title="Join this clip and the next one into a single clip (M)"
+      >
+        Merge with next clip
+      </Button>
       <Button variant="primary" className="mt-3 w-full" onClick={onExport} loading={exporting} icon={<Download className="size-4" />}>
         {exporting ? 'Exporting…' : 'Export this clip'}
       </Button>
@@ -231,7 +243,7 @@ export function ClipInspector({ clip, index, duration, videoRef, playing, export
       <p className="mt-4 text-[11px] leading-relaxed text-subtle">
         Shortcuts: <kbd className="font-mono text-muted">Space</kbd> play · <kbd className="font-mono text-muted">←/→</kbd> seek ·{' '}
         <kbd className="font-mono text-muted">I</kbd>/<kbd className="font-mono text-muted">O</kbd> set start/end ·{' '}
-        <kbd className="font-mono text-muted">S</kbd> split
+        <kbd className="font-mono text-muted">S</kbd> split · <kbd className="font-mono text-muted">M</kbd> merge with next
       </p>
     </div>
   )

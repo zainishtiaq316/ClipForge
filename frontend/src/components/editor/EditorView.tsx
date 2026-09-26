@@ -173,6 +173,30 @@ export function EditorView({ initial }: { initial: Project }) {
     setSelectedId(second.id)
   }, [clips, selectedId, toast])
 
+  /** Join the selected clip with the one after it into a single continuous clip. */
+  const mergeWithNext = useCallback(() => {
+    const index = clips.findIndex((c) => c.id === selectedId)
+    const current = clips[index]
+    const next = clips[index + 1]
+    if (!current) return
+    if (!next) return toast('This is the last clip, there is nothing after it to merge with', 'info')
+    const merged: Clip = { ...current, start: Math.min(current.start, next.start), end: Math.max(current.end, next.end) }
+    const gap = next.start - current.end
+    setClips((all) => sortClips([...all.filter((c) => c.id !== current.id && c.id !== next.id), merged]))
+    setChecked((set) => {
+      const nextSet = new Set(set)
+      nextSet.delete(next.id)
+      return nextSet
+    })
+    setSelectedId(merged.id)
+    toast(
+      gap > 0.05
+        ? `Merged into one ${formatDuration(merged.end - merged.start)} clip (including the ${formatDuration(gap)} between them)`
+        : `Merged into one ${formatDuration(merged.end - merged.start)} clip`,
+      'success',
+    )
+  }, [clips, selectedId, toast])
+
   const deleteClip = useCallback(
     (id: string) => {
       const index = clips.findIndex((c) => c.id === id)
@@ -221,16 +245,16 @@ export function EditorView({ initial }: { initial: Project }) {
   }
 
   // --- keyboard shortcuts --------------------------------------------------------
-  const shortcuts = useRef({ selected, updateClip, splitClip, seek, deleteClip })
+  const shortcuts = useRef({ selected, updateClip, splitClip, seek, deleteClip, mergeWithNext })
   useLayoutEffect(() => {
-    shortcuts.current = { selected, updateClip, splitClip, seek, deleteClip }
+    shortcuts.current = { selected, updateClip, splitClip, seek, deleteClip, mergeWithNext }
   })
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement
       if (el.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return
       const video = videoRef.current
-      const { selected, updateClip, splitClip, seek } = shortcuts.current
+      const { selected, updateClip, splitClip, seek, mergeWithNext } = shortcuts.current
       if (!video) return
       const t = video.currentTime
       switch (e.key) {
@@ -256,6 +280,9 @@ export function EditorView({ initial }: { initial: Project }) {
           break
         case 's':
           splitClip()
+          break
+        case 'm':
+          mergeWithNext()
           break
       }
     }
@@ -348,6 +375,8 @@ export function EditorView({ initial }: { initial: Project }) {
             onChange={(patch) => selected && updateClip(selected.id, patch)}
             onPlay={() => selected && playClip(selected)}
             onSplit={splitClip}
+            onMergeNext={mergeWithNext}
+            canMergeNext={!!selected && clips.indexOf(selected) < clips.length - 1}
             onDelete={() => selected && deleteClip(selected.id)}
             onExport={() => selected && exportClip(selected)}
           />
