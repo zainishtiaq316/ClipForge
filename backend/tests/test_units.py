@@ -316,6 +316,10 @@ def test_text_detector_finds_a_caption_line():
     assert widest.w > 0.5 and widest.y > 0.75, widest
 
 
+def test_frame_mode_is_a_valid_framing():
+    assert Clip(start=0, end=5, framing="frame").framing == "frame"
+
+
 def test_legacy_fit_framing_becomes_zoom():
     clip = Clip.model_validate({"start": 0, "end": 5, "framing": "fit"})
     assert clip.framing == "auto" and clip.zoom == 1.0

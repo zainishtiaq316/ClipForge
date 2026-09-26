@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 ProjectStatus = Literal["queued", "downloading", "analyzing", "ready", "failed"]
 ExportStatus = Literal["queued", "rendering", "packaging", "done", "failed"]
-Framing = Literal["auto", "track", "center"]
+Framing = Literal["auto", "frame", "track", "center"]
 
 MAX_CLIPS = 300
 MIN_CLIP_LENGTH = 1.0

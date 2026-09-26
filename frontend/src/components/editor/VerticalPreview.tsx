@@ -10,7 +10,7 @@ interface Props {
   selected: Clip | null
 }
 
-const FRAMING_LABEL = { auto: 'Smart framing', track: 'Subject tracking', center: 'Centered' }
+const FRAMING_LABEL = { auto: 'Smart framing', frame: 'Whole frame', track: 'Subject tracking', center: 'Centered' }
 
 const CANVAS_W = 540
 const CANVAS_H = 960
@@ -70,7 +70,7 @@ export function VerticalPreview({ videoRef, cameraPath, clips, selected }: Props
         <span className="flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
           <Crosshair className="size-3" />
           {FRAMING_LABEL[selected?.framing ?? 'auto']}
-          {selected && selected.zoom > 0 ? ` · zoom out ≥ ${Math.round(selected.zoom * 100)}%` : ''}
+          {selected && selected.zoom > 0 && selected.framing !== 'frame' ? ` · zoom out ≥ ${Math.round(selected.zoom * 100)}%` : ''}
         </span>
       </div>
       <div className="mx-auto w-full max-w-[220px] sm:max-w-[260px] lg:max-w-[calc(56vh*0.5625)]">

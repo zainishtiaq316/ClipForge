@@ -68,6 +68,8 @@ def render_vertical_clip(
     duration = end - start
     if duration <= 0:
         raise ValueError("Clip end must be after its start")
+    if framing == "frame":
+        zoom = 1.0  # the whole original frame, centred on black: nothing is cropped, nothing to track
 
     src_w, src_h = info.width, info.height
     fps = info.fps

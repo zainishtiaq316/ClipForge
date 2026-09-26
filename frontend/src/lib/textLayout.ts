@@ -267,7 +267,8 @@ export interface FrameLayout {
 export function frameLayout(path: CameraPathData | null, clip: Clip | null | undefined, t: number, srcW: number, srcH: number): FrameLayout {
   const framing = clip?.framing ?? 'auto'
   // Smart framing zooms out automatically to keep a whole person / title card in frame.
-  const zoom = Math.max(clip?.zoom ?? 0, framing === 'auto' ? zoomAt(path, t) : 0)
+  // Frame shows the whole original video; Smart may zoom out on its own (same rules as the renderer).
+  const zoom = framing === 'frame' ? 1 : Math.max(clip?.zoom ?? 0, framing === 'auto' ? zoomAt(path, t) : 0)
   const cropW = cropWidth(srcW, srcH, zoom)
   const follows = (framing === 'auto' || framing === 'track') && cropW < srcW
   const center = follows ? cropCenterAt(path, t, framing) : 0.5

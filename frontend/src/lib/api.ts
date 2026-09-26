@@ -2,7 +2,7 @@
 // proxied by Vite in development and served by FastAPI in production.
 
 export type ProjectStatus = 'queued' | 'downloading' | 'analyzing' | 'ready' | 'failed'
-export type Framing = 'auto' | 'track' | 'center'
+export type Framing = 'auto' | 'frame' | 'track' | 'center'
 
 export interface MediaInfo {
   duration: number

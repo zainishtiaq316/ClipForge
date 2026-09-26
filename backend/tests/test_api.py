@@ -158,3 +158,30 @@ def test_rejects_bad_input(client):
     assert client.post("/api/projects/youtube", json={"url": "https://evil.com/v"}).status_code == 422
     assert client.get("/api/projects/..%2F..%2Fetc").status_code == 404
     assert client.get("/api/projects/" + "0" * 32).status_code == 404
+
+
+def test_frame_mode_exports_the_whole_picture_on_black(client, project):
+    import subprocess
+
+    import numpy as np
+
+    pid = project["id"]
+    clips = client.get(f"/api/projects/{pid}").json()["clips"]
+    framed = [dict(c, framing="frame") if i == 0 else c for i, c in enumerate(clips)]
+    assert client.put(f"/api/projects/{pid}/clips", json={"clips": framed}).status_code == 200
+    job = client.post(f"/api/projects/{pid}/exports", json={"clip_ids": [clips[0]["id"]]}).json()
+    job = _wait(client, f"/api/exports/{job['id']}", lambda d: d["status"] in {"done", "failed"})
+    assert job["status"] == "done", job
+    out = Path(tempfile.mkdtemp()) / "frame.mp4"
+    out.write_bytes(client.get(f"/api/exports/{job['id']}/download").content)
+    info = ffmpeg.probe(out)
+    assert (info.width, info.height) == (360, 640)
+
+    raw = subprocess.run(
+        [ffmpeg.ffmpeg_path(), "-v", "error", "-ss", "1", "-i", str(out), "-frames:v", "1",
+         "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+    frame = np.frombuffer(raw, np.uint8).reshape(640, 360)
+    video_h = round(360 * 360 / 640)  # a 640x360 source scaled to 360 wide
+    top = (640 - video_h) // 2
+    assert frame[: top - 4].mean() < 8 and frame[top + video_h + 4:].mean() < 8, "black bars above and below"
+    assert frame[top + 4: top + video_h - 4].mean() > 40, "the whole picture in the middle"
