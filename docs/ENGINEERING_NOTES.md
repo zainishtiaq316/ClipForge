@@ -82,8 +82,10 @@ Consecutive detections of the same lines form a run; each run is measured once o
 
 Because the actual pixels are reused (no OCR, no re-typing), the font, colours, caption box and even animations are
 preserved. For text without a box only the letters move: they are selected by the letters' own colour (measured at
-planning time) and only inside the detected text area, so the person or stage behind them is left behind; a shape much
-taller than the letters (a hand crossing the text) is trimmed to the letter band. Texts sharing a row stay on one row,
+planning time) and only inside the detected text area, so the person or stage behind them is left behind. On top of that, each caption gets a **letter stencil**: the
+intersection of its letter masks on three frames spread over the run. Overlay text stays put while people move, so the
+stencil holds exactly the letters; pasting only through it means a hand or a white sleeve crossing the caption is
+never moved with it. Texts sharing a row stay on one row,
 and big display type (title cards) is never cut up, because the card's shot is zoomed to show it whole. The fingerprint check prevents pasting text while it is fading or sliding in, when the reference
 rectangle would contain something else.
 

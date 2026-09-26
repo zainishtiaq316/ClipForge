@@ -50,6 +50,8 @@ export interface TextLineData {
   ink: number
   fg?: number[] // letters' colour (BGR) for text that isn't on a caption box
   core?: [number, number] // where the letters are across the rect (0..1); the rest is padding
+  stencil?: string // letter shapes (packed bits, base64); only these pixels are ever moved
+  stencil_shape?: [number, number] // rows, cols
 }
 
 /** Overlay text on screen from `start` to `end`, re-flowed into the vertical frame. */

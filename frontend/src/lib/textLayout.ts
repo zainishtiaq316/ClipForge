@@ -305,6 +305,27 @@ export function coveredFraction([x, y, w, h]: Rect, op: LineOps): number {
 }
 
 let scratch: HTMLCanvasElement | null = null
+const stencils = new WeakMap<TextLineData, HTMLCanvasElement>()
+
+/** The line's letter stencil as a canvas (opaque where the letters are), decoded once. */
+function stencilCanvas(line: TextLineData): HTMLCanvasElement | null {
+  if (!line.stencil || !line.stencil_shape) return null
+  const cached = stencils.get(line)
+  if (cached) return cached
+  const [rows, cols] = line.stencil_shape
+  const bytes = Uint8Array.from(atob(line.stencil), (c) => c.charCodeAt(0))
+  const canvas = document.createElement('canvas')
+  canvas.width = cols
+  canvas.height = rows
+  const ctx = canvas.getContext('2d')!
+  const img = ctx.createImageData(cols, rows)
+  for (let i = 0; i < rows * cols; i++) {
+    if ((bytes[i >> 3] >> (7 - (i & 7))) & 1) img.data[i * 4 + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  stencils.set(line, canvas)
+  return canvas
+}
 
 /** Draw erase + re-flowed text for one frame onto `ctx` (same rules as text_layout.draw_ops). */
 export function drawTextOps(ctx: CanvasRenderingContext2D, source: CanvasImageSource, ops: LineOps[]) {
@@ -371,6 +392,17 @@ export function drawTextOps(ctx: CanvasRenderingContext2D, source: CanvasImageSo
         }
       }
       sctx.putImageData(img, 0, 0)
+      // Only the letters' own shapes (same stencil the renderer uses).
+      const stencil = stencilCanvas(op.line)
+      if (stencil) {
+        const [segA, segB] = op.segments[k]
+        const sx = Math.floor(segA * stencil.width)
+        const sw = Math.max(1, Math.floor(segB * stencil.width) - sx)
+        sctx.globalCompositeOperation = 'destination-in'
+        sctx.imageSmoothingEnabled = false
+        sctx.drawImage(stencil, sx, 0, sw, stencil.height, 0, 0, dw, dh)
+        sctx.globalCompositeOperation = 'source-over'
+      }
       ctx.drawImage(scratch, dst[0], dst[1])
     }
   }

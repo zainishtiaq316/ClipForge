@@ -21,6 +21,8 @@ Two stages:
 
 from __future__ import annotations
 
+import base64
+import dataclasses
 import itertools
 import logging
 import math
@@ -84,6 +86,8 @@ class TextLine:
     thumb: tuple[int, ...] = ()  # THUMB_W x THUMB_H grayscale fingerprint of the reference text
     fg: tuple[int, ...] = ()  # the letters' own colour (BGR), for text that isn't on a caption box
     core: tuple[float, float] = (0.0, 1.0)  # where the letters are across the rect (the rest is padding)
+    stencil: str = ""  # letter shapes over the whole run (packed bits, base64), see _stencil
+    stencil_shape: tuple[int, int] = (0, 0)  # rows, cols of the stencil
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -92,6 +96,7 @@ class TextLine:
         data["thumb"] = list(self.thumb)
         data["fg"] = list(self.fg)
         data["core"] = [round(c, 4) for c in self.core]
+        data["stencil_shape"] = list(self.stencil_shape)
         for key in ("x", "y", "w", "h", "ink"):
             data[key] = round(data[key], 4)
         return data
@@ -103,6 +108,7 @@ class TextLine:
             boxed=data["boxed"], bg=tuple(data["bg"]), ink=data["ink"],
             thumb=tuple(data.get("thumb", ())), fg=tuple(data.get("fg", ())),
             core=tuple(data.get("core", (0.0, 1.0))),
+            stencil=data.get("stencil", ""), stencil_shape=tuple(data.get("stencil_shape", (0, 0))),
         )
 
 
@@ -387,6 +393,47 @@ def _with_companions(lines: list[TextBox], all_boxes: list[TextBox]) -> list[Tex
     return out
 
 
+STENCIL_MAX_PIXELS = 120_000  # stencils are stored at most this big (keeps project files small)
+
+
+def _with_stencil(line: TextLine, frames: list[np.ndarray]) -> TextLine:
+    """Letter shapes that are present in every sampled frame of the run.
+
+    Overlay text stays put while people move, so intersecting the letter masks of a
+    few frames keeps exactly the letters and drops anything that just passed by.
+    Pasting only through this stencil means nothing but the text is ever moved.
+    """
+    if line.boxed or not line.fg:
+        return line
+    fh, fw = frames[0].shape[:2]
+    x0, y0 = int(line.x * fw), int(line.y * fh)
+    x1, y1 = int((line.x + line.w) * fw), int((line.y + line.h) * fh)
+    common = None
+    for frame in frames:
+        patch = frame[y0:y1, x0:x1]
+        mask = letter_mask(patch, line.bg, line.fg)
+        common = mask if common is None else common & mask
+    if common is None or not common.any():
+        return line
+    cols = np.arange(common.shape[1]) / common.shape[1]
+    common[:, (cols < line.core[0]) | (cols > line.core[1])] = 0
+    common = cv2.dilate(common, np.ones((3, 3), np.uint8))  # keep anti-aliased edges
+    scale = min(1.0, (STENCIL_MAX_PIXELS / common.size) ** 0.5)
+    if scale < 1.0:
+        size = (max(1, int(common.shape[1] * scale)), max(1, int(common.shape[0] * scale)))
+        common = (cv2.resize(common.astype(np.float32), size, interpolation=cv2.INTER_AREA) > 0.2).astype(np.uint8)
+    packed = base64.b64encode(np.packbits(common.ravel()).tobytes()).decode("ascii")
+    return dataclasses.replace(line, stencil=packed, stencil_shape=(int(common.shape[0]), int(common.shape[1])))
+
+
+def stencil_mask(line: TextLine) -> np.ndarray | None:
+    if not line.stencil:
+        return None
+    rows, cols = line.stencil_shape
+    bits = np.unpackbits(np.frombuffer(base64.b64decode(line.stencil), np.uint8))[: rows * cols]
+    return bits.reshape(rows, cols)
+
+
 def plan_text_layouts(
     path: Path, info: ffmpeg.MediaInfo, analysis: Analysis, detector: TextDetector
 ) -> list[TextLayout]:
@@ -402,6 +449,11 @@ def plan_text_layouts(
         detected = detector.detect(small)
         boxes = _merge_same_line(_with_companions(overlay_lines(detected), detected))
         lines = [ln for ln in (_measure_line(frame, b) for b in boxes) if ln is not None]
+        # Frames from elsewhere in the run: whatever isn't a letter in all of them (a hand,
+        # a sleeve passing behind the caption) is left out of the stencil.
+        others = [_read_frame(path, info, start + k * (end - start)) for k in (0.25, 0.75)]
+        others = [f for f in others if f is not None]
+        lines = [_with_stencil(ln, [frame, *others]) for ln in lines]
         if lines:
             ordered = tuple(sorted(lines, key=lambda ln: ln.y))
             layouts.append(TextLayout(start, end, ordered, is_text_block(ordered)))
@@ -757,6 +809,13 @@ def draw_ops(canvas: np.ndarray, frame: np.ndarray, ops: list[LineOps]) -> None:
                 # Keep only columns inside the detected text (the padding may hold a shirt or a hand).
                 cols = seg_a + (np.arange(dw)[x0 - dx: x1 - dx] + 0.5) / dw * (seg_b - seg_a)
                 letters[:, (cols < op.line.core[0]) | (cols > op.line.core[1])] = 0
+                stencil = stencil_mask(op.line)
+                if stencil is not None:
+                    # Only the letters' own shapes: nothing that merely crosses the text gets moved.
+                    sc0 = int(seg_a * stencil.shape[1])
+                    sc1 = max(sc0 + 1, int(seg_b * stencil.shape[1]))
+                    part = cv2.resize(stencil[:, sc0:sc1], (dw, dh), interpolation=cv2.INTER_NEAREST)
+                    letters &= part[y0 - dy: y1 - dy, x0 - dx: x1 - dx]
                 alpha = cv2.GaussianBlur(letters.astype(np.float32), (0, 0), 0.8)[..., None]
                 base = canvas[y0:y1, x0:x1].astype(np.float32)
                 canvas[y0:y1, x0:x1] = (piece * alpha + base * (1 - alpha)).astype(np.uint8)
